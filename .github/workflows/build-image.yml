@@ -6,6 +6,10 @@ name: Build OpenWrt image
 #
 # 默认构建目标（版本号 + 架构）在整个仓库里只有一处定义：config/build.conf。
 # 改那一个文件的两行，push 后就会重编并覆盖 Release；本文件无需再动。
+# 与 target 相关的规格（IB 包名 tag、profile、rootfs 尺寸、要发布的产物变体名、
+# Release 文案）全部在 config/<arch>.conf 里 —— 各 target 的产物形态不同
+# （x86 出 ext4-combined-efi，rockchip 出 ext4-sysupgrade），所以本文件里
+# 不出现任何具体变体名或架构名。
 # 注意：Actions 不允许 workflow_dispatch 的 default / options 引用变量或文件，
 # 所以这两项只能留空，值统一由 build.conf 决定。
 on:
@@ -36,7 +40,7 @@ on:
         required: false
         default: ""
       publish:
-        description: "Publish the combined-efi image to a GitHub Release"
+        description: "Publish the image variant named by RELEASE_VARIANT in config/<arch>.conf to a GitHub Release"
         required: false
         type: boolean
         default: true
@@ -56,7 +60,6 @@ concurrency:
 env:
   BUILD_CONF: "config/build.conf"
   IB_MIRROR: "https://downloads.openwrt.org"
-  RELEASE_ONLY_VARIANT: "combined-efi"
 
 jobs:
   build:
@@ -118,6 +121,18 @@ jobs:
             exit 1
           fi
 
+          # 目标相关字段必须齐全。产物变体名（RELEASE_VARIANT）各 target 不同，
+          # 所以它跟其它规格一样由 config/<arch>.conf 决定，不再写死在本文件里。
+          for v in TARGET SUBTARGET ARCH_PACKAGES IB_ARCH_TAG IB_HOST_TAG PROFILE \
+                   ROOTFS_SIZE ROOTFS_FS EXTRA_IMAGE_NAME RELEASE_VARIANT \
+                   VARIANT_DESC FLASH_HINT PACKAGES; do
+            eval "val=\${${v}:-}"
+            if [ -z "$val" ]; then
+              echo "::error::${conf} is missing required variable ${v}"
+              exit 1
+            fi
+          done
+
           profile="$(printf '%s' "${IN_PROFILE:-}" | tr -d '[:space:]')"
           [ -n "$profile" ] || profile="$PROFILE"
 
@@ -159,6 +174,10 @@ jobs:
             echo "profile=${profile}"
             echo "rootfs_size=${size}"
             echo "extra_image_name=${extra}"
+            echo "rootfs_fs=${ROOTFS_FS}"
+            echo "release_variant=${RELEASE_VARIANT}"
+            echo "variant_desc=${VARIANT_DESC}"
+            echo "flash_hint=${FLASH_HINT}"
             echo "ib_name=${ib_name}"
             echo "ib_dir=${ib_dir}"
             echo "ib_url=${ib_url}"
@@ -178,6 +197,8 @@ jobs:
           echo "profile     : ${profile}"
           echo "rootfs size : ${size} MiB"
           echo "extra name  : ${extra}"
+          echo "rootfs fs   : ${ROOTFS_FS}"
+          echo "release var.: ${RELEASE_VARIANT}   (only this variant is published)"
           echo "release tag : ${tag}"
           echo "publish     : ${publish}"
           echo "imagebuilder: ${ib_url}"
@@ -258,7 +279,7 @@ jobs:
         env:
           TARGET_DIR: ${{ steps.cfg.outputs.target }}
           SUBTARGET_DIR: ${{ steps.cfg.outputs.subtarget }}
-          VARIANT: ${{ env.RELEASE_ONLY_VARIANT }}
+          VARIANT: ${{ steps.cfg.outputs.release_variant }}
         run: |
           set -euo pipefail
           mkdir -p out
@@ -267,13 +288,22 @@ jobs:
           echo "--- everything that was built ---"
           find "$bin" -maxdepth 1 -type f -printf '%12s  %f\n' | sort -k2 || true
 
-          img="$(find "$bin" -maxdepth 1 -type f \
-                   -name "*-${VARIANT}.img.gz" ! -name '*squashfs*' \
-                   -printf '%f\n' | head -1)"
-          if [ -z "$img" ]; then
-            echo "::error::no ext4 ${VARIANT} image was produced"
+          # 变体名取自 config/<arch>.conf 的 RELEASE_VARIANT：
+          #   x86_64 -> ext4-combined-efi      r2s -> ext4-sysupgrade
+          # 它已带文件系统前缀，因此无需再排除 squashfs；匹配到多个就报错，
+          # 免得静默挑中另一个变体。
+          mapfile -t hits < <(find "$bin" -maxdepth 1 -type f \
+                                -name "*-${VARIANT}.img.gz" -printf '%f\n' | sort)
+          if [ "${#hits[@]}" -eq 0 ]; then
+            echo "::error::no image matching *-${VARIANT}.img.gz was produced"
             exit 1
           fi
+          if [ "${#hits[@]}" -gt 1 ]; then
+            echo "::error::${#hits[@]} images match *-${VARIANT}.img.gz, expected exactly one:"
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          img="${hits[0]}"
 
           gzip -t "$bin/$img"
           echo "gzip integrity OK: ${img}"
@@ -318,6 +348,10 @@ jobs:
           SUBTARGET_OUT: ${{ steps.cfg.outputs.subtarget }}
           PROFILE_OUT: ${{ steps.cfg.outputs.profile }}
           SIZE_OUT: ${{ steps.cfg.outputs.rootfs_size }}
+          FS_OUT: ${{ steps.cfg.outputs.rootfs_fs }}
+          VARIANT_OUT: ${{ steps.cfg.outputs.release_variant }}
+          VARIANT_DESC_OUT: ${{ steps.cfg.outputs.variant_desc }}
+          FLASH_HINT_OUT: ${{ steps.cfg.outputs.flash_hint }}
           EXTRA_OUT: ${{ steps.cfg.outputs.extra_image_name }}
           MANIFEST: ${{ steps.art.outputs.manifest }}
           IMG: ${{ steps.art.outputs.img }}
@@ -341,22 +375,22 @@ jobs:
             echo "| OpenWrt 版本 | ${VER} |"
             echo "| target | ${TARGET_OUT}/${SUBTARGET_OUT} |"
             echo "| profile | ${PROFILE_OUT} |"
-            echo "| 根文件系统 | ext4 |"
+            echo "| 根文件系统 | ${FS_OUT} |"
             echo "| rootfs 分区 | ${SIZE_OUT} MiB |"
-            echo "| 镜像变体 | combined-efi（GPT + EFI 启动，整盘镜像） |"
+            echo "| 镜像变体 | ${VARIANT_DESC_OUT} |"
             echo "| 已安装软件包 | ${pkgcount} 个 |"
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"
             echo "| sha256 | ${SHA} |"
             echo
-            echo "写入 U 盘或虚拟机磁盘后即可引导；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
+            echo "${FLASH_HINT_OUT}；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
             echo "rootfs 分区保持 ${SIZE_OUT} MiB 不变，可从任意同规格自制镜像增量升级并保留配置。"
           } > RELEASE_NOTES.md
 
           cat RELEASE_NOTES.md
           echo "-----------------------------"
 
-          title="OpenWrt ${VER} ${ARCH} (ext4 ${SIZE_OUT} MiB, combined-efi)"
+          title="OpenWrt ${VER} ${ARCH} (${FS_OUT} ${SIZE_OUT} MiB, ${VARIANT_OUT})"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release ${TAG} already exists - replacing its asset"
