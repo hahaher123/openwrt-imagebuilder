@@ -1,22 +1,24 @@
 name: Build OpenWrt image
 
 # 触发方式
-#   1) workflow_dispatch —— 手动指定版本号 + 架构（主入口）
-#   2) push 到 main 且改动 config/ 或本文件 —— 用仓库默认值（config 里的 FALLBACK）构建
+#   1) workflow_dispatch —— 手动指定版本号 + 架构；两项留空即取 config/build.conf
+#   2) push 到 main 且改动 config/** 或本文件 —— 直接用 config/build.conf 构建
+#
+# 默认构建目标（版本号 + 架构）在整个仓库里只有一处定义：config/build.conf。
+# 改那一个文件的两行，push 后就会重编并覆盖 Release；本文件无需再动。
+# 注意：Actions 不允许 workflow_dispatch 的 default / options 引用变量或文件，
+# 所以这两项只能留空，值统一由 build.conf 决定。
 on:
   workflow_dispatch:
     inputs:
       openwrt_version:
-        description: "OpenWrt release version, e.g. 25.12.5"
-        required: true
-        default: "25.12.5"
+        description: "OpenWrt 版本号，形如 25.12.x（留空 = 用 config/build.conf 的 VERSION）"
+        required: false
+        default: ""
       arch:
-        description: "Target architecture (must have config/<arch>.conf)"
-        required: true
-        type: choice
-        default: x86_64
-        options:
-          - x86_64
+        description: "架构，需存在 config/<架构>.conf（留空 = 用 config/build.conf 的 ARCH）"
+        required: false
+        default: ""
       profile:
         description: "Target profile (blank = use config default)"
         required: false
@@ -52,8 +54,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  FALLBACK_VERSION: "25.12.5"
-  FALLBACK_ARCH: "x86_64"
+  BUILD_CONF: "config/build.conf"
   IB_MIRROR: "https://downloads.openwrt.org"
   RELEASE_ONLY_VARIANT: "combined-efi"
 
@@ -79,11 +80,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ---- 版本号与架构：唯一来源 ----
+          if [ ! -f "$BUILD_CONF" ]; then
+            echo "::error::missing ${BUILD_CONF} - it defines the default version and arch"
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          . "$BUILD_CONF"
+          echo "--- defaults from ${BUILD_CONF} ---"
+          grep -E '^[[:space:]]*(VERSION|ARCH)=' "$BUILD_CONF" || true
+
           ver="$(printf '%s' "${IN_VERSION:-}" | tr -d '[:space:]')"
-          [ -n "$ver" ] || ver="$FALLBACK_VERSION"
+          [ -n "$ver" ] || ver="${VERSION:-}"
+          if [ -z "$ver" ]; then
+            echo "::error::no version: workflow input is empty and ${BUILD_CONF} has no VERSION"
+            exit 1
+          fi
 
           arch="$(printf '%s' "${IN_ARCH:-}" | tr -d '[:space:]')"
-          [ -n "$arch" ] || arch="$FALLBACK_ARCH"
+          [ -n "$arch" ] || arch="${ARCH:-}"
+          if [ -z "$arch" ]; then
+            echo "::error::no arch: workflow input is empty and ${BUILD_CONF} has no ARCH"
+            exit 1
+          fi
 
           conf="config/${arch}.conf"
           if [ ! -f "$conf" ]; then
@@ -93,6 +112,11 @@ jobs:
           fi
           # shellcheck source=/dev/null
           . "$conf"
+
+          if [ "${CONF_ARCH:-}" != "$arch" ]; then
+            echo "::error::${conf} declares CONF_ARCH='${CONF_ARCH:-}' but was selected as arch '${arch}'"
+            exit 1
+          fi
 
           profile="$(printf '%s' "${IN_PROFILE:-}" | tr -d '[:space:]')"
           [ -n "$profile" ] || profile="$PROFILE"
@@ -310,7 +334,7 @@ jobs:
           fi
 
           {
-            echo "OpenWrt ${VER} 的 x86/64 自建镜像，由官方 ImageBuilder 产出。"
+            echo "OpenWrt ${VER} 的 ${TARGET_OUT}/${SUBTARGET_OUT} 自建镜像，由官方 ImageBuilder 产出。"
             echo
             echo "| 项 | 值 |"
             echo "| --- | --- |"
@@ -332,7 +356,7 @@ jobs:
           cat RELEASE_NOTES.md
           echo "-----------------------------"
 
-          title="OpenWrt ${VER} x86_64 (ext4 ${SIZE_OUT} MiB, combined-efi)"
+          title="OpenWrt ${VER} ${ARCH} (ext4 ${SIZE_OUT} MiB, combined-efi)"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release ${TAG} already exists - replacing its asset"
