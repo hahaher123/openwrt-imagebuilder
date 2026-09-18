@@ -1,0 +1,13 @@
+# 构建产物（只在本机试跑时可能出现）
+*.img
+*.img.gz
+*.manifest
+*.bom.cdx.json
+out/
+ib/
+imagebuilder/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.swp

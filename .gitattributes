@@ -1,0 +1,9 @@
+# 文本文件一律以 LF 存储与检出 —— CI 在 Linux 上运行，YAML 与 shell 不接受 CRLF。
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.gz binary
+*.img binary
+*.zst binary

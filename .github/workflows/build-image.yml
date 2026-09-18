@@ -1,0 +1,340 @@
+name: Build OpenWrt image
+
+# 触发方式
+#   1) workflow_dispatch —— 手动指定版本号 + 架构（主入口）
+#   2) push 到 main 且改动 config/ 或本文件 —— 用仓库默认值（config 里的 FALLBACK）构建
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt release version, e.g. 25.12.5"
+        required: true
+        default: "25.12.5"
+      arch:
+        description: "Target architecture (must have config/<arch>.conf)"
+        required: true
+        type: choice
+        default: x86_64
+        options:
+          - x86_64
+      profile:
+        description: "Target profile (blank = use config default)"
+        required: false
+        default: ""
+      rootfs_size:
+        description: "rootfs partition size in MiB (blank = use config default)"
+        required: false
+        default: ""
+      extra_image_name:
+        description: "EXTRA_IMAGE_NAME, the filename tag (blank = use config default)"
+        required: false
+        default: ""
+      packages:
+        description: "Extra packages, space separated (blank = use config default)"
+        required: false
+        default: ""
+      publish:
+        description: "Publish the combined-efi image to a GitHub Release"
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "config/**"
+      - ".github/workflows/build-image.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FALLBACK_VERSION: "25.12.5"
+  FALLBACK_ARCH: "x86_64"
+  IB_MIRROR: "https://downloads.openwrt.org"
+  RELEASE_ONLY_VARIANT: "combined-efi"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        id: cfg
+        shell: bash
+        env:
+          IN_VERSION: ${{ inputs.openwrt_version }}
+          IN_ARCH: ${{ inputs.arch }}
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_SIZE: ${{ inputs.rootfs_size }}
+          IN_EXTRA: ${{ inputs.extra_image_name }}
+          IN_PKGS: ${{ inputs.packages }}
+          IN_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+
+          ver="$(printf '%s' "${IN_VERSION:-}" | tr -d '[:space:]')"
+          [ -n "$ver" ] || ver="$FALLBACK_VERSION"
+
+          arch="$(printf '%s' "${IN_ARCH:-}" | tr -d '[:space:]')"
+          [ -n "$arch" ] || arch="$FALLBACK_ARCH"
+
+          conf="config/${arch}.conf"
+          if [ ! -f "$conf" ]; then
+            echo "::error::unknown arch '${arch}' - no such file: ${conf}"
+            ls -1 config/
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          . "$conf"
+
+          profile="$(printf '%s' "${IN_PROFILE:-}" | tr -d '[:space:]')"
+          [ -n "$profile" ] || profile="$PROFILE"
+
+          size="$(printf '%s' "${IN_SIZE:-}" | tr -d '[:space:]')"
+          [ -n "$size" ] || size="$ROOTFS_SIZE"
+          case "$size" in
+            '' | *[!0-9]*)
+              echo "::error::rootfs_size must be an integer number of MiB, got '${size}'"
+              exit 1
+              ;;
+          esac
+
+          extra="$(printf '%s' "${IN_EXTRA:-}" | tr -d '[:space:]')"
+          [ -n "$extra" ] || extra="$EXTRA_IMAGE_NAME"
+
+          pkgs="$(printf '%s' "${IN_PKGS:-}" | tr '\n\r\t' '   ' | tr -s ' ')"
+          [ -n "$pkgs" ] || pkgs="$PACKAGES"
+
+          publish="${IN_PUBLISH:-}"
+          case "$publish" in
+            '') publish="true" ;;
+            true | false) : ;;
+            *)
+              echo "::error::publish must be true or false, got '${publish}'"
+              exit 1
+              ;;
+          esac
+
+          ib_name="openwrt-imagebuilder-${ver}-${IB_ARCH_TAG}.${IB_HOST_TAG}.tar.zst"
+          ib_dir="${ib_name%.tar.zst}"
+          ib_url="${IB_MIRROR}/releases/${ver}/targets/${TARGET}/${SUBTARGET}/${ib_name}"
+          tag="v${ver}-${arch}"
+
+          {
+            echo "version=${ver}"
+            echo "arch=${arch}"
+            echo "target=${TARGET}"
+            echo "subtarget=${SUBTARGET}"
+            echo "profile=${profile}"
+            echo "rootfs_size=${size}"
+            echo "extra_image_name=${extra}"
+            echo "ib_name=${ib_name}"
+            echo "ib_dir=${ib_dir}"
+            echo "ib_url=${ib_url}"
+            echo "tag=${tag}"
+            echo "publish=${publish}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "packages<<__PACKAGES_EOF__"
+            echo "$pkgs"
+            echo "__PACKAGES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "=== resolved parameters ==="
+          echo "version     : ${ver}"
+          echo "arch        : ${arch}   (target ${TARGET}/${SUBTARGET})"
+          echo "profile     : ${profile}"
+          echo "rootfs size : ${size} MiB"
+          echo "extra name  : ${extra}"
+          echo "release tag : ${tag}"
+          echo "publish     : ${publish}"
+          echo "imagebuilder: ${ib_url}"
+          echo "packages    : ${pkgs}"
+
+      - name: Download ImageBuilder
+        shell: bash
+        env:
+          IB_URL: ${{ steps.cfg.outputs.ib_url }}
+          IB_NAME: ${{ steps.cfg.outputs.ib_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p ib
+          cd ib
+          base="$(dirname "$IB_URL")"
+          echo "GET ${base}/${IB_NAME}"
+          curl -fSL --retry 3 --retry-delay 5 -o "$IB_NAME" "${base}/${IB_NAME}"
+          curl -fSL --retry 3 --retry-delay 5 -o sha256sums "${base}/sha256sums"
+
+          expected="$(awk -v f="$IB_NAME" '$2 == f || $2 == "*" f { print $1 }' sha256sums)"
+          actual="$(sha256sum "$IB_NAME" | cut -d' ' -f1)"
+          if [ -z "$expected" ]; then
+            echo "::error::${IB_NAME} is not listed in the official sha256sums"
+            exit 1
+          fi
+          echo "official sha256 : ${expected}"
+          echo "downloaded sha256: ${actual}"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::sha256 mismatch - refusing to build with a tampered archive"
+            exit 1
+          fi
+          echo "archive size: $(du -h "$IB_NAME" | cut -f1)"
+
+      - name: Extract ImageBuilder
+        shell: bash
+        env:
+          IB_NAME: ${{ steps.cfg.outputs.ib_name }}
+          IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
+        run: |
+          set -euo pipefail
+          tar --zstd -xf "ib/${IB_NAME}" -C ib
+          if [ ! -d "ib/${IB_DIR}" ]; then
+            echo "::error::unexpected archive layout, expected dir ib/${IB_DIR}"
+            ls -la ib
+            exit 1
+          fi
+          echo "--- package repositories baked into this ImageBuilder ---"
+          cat "ib/${IB_DIR}/repositories"
+          echo
+          echo "--- target profiles ---"
+          ( cd "ib/${IB_DIR}" && make info 2>/dev/null | sed -n '1,30p' ) || true
+
+      - name: Build image
+        shell: bash
+        working-directory: ib/${{ steps.cfg.outputs.ib_dir }}
+        env:
+          PROFILE_IN: ${{ steps.cfg.outputs.profile }}
+          SIZE_IN: ${{ steps.cfg.outputs.rootfs_size }}
+          EXTRA_IN: ${{ steps.cfg.outputs.extra_image_name }}
+          PKGS: ${{ steps.cfg.outputs.packages }}
+        run: |
+          set -euo pipefail
+          echo "--- disk before ---"
+          df -h . | tail -1
+          echo "--- make image ---"
+          make image \
+            PROFILE="$PROFILE_IN" \
+            PACKAGES="$PKGS" \
+            ROOTFS_PARTSIZE="$SIZE_IN" \
+            EXTRA_IMAGE_NAME="$EXTRA_IN" \
+            -j"$(nproc)" 2>&1 | tee build.log
+          echo "--- disk after ---"
+          df -h . | tail -1
+
+      - name: Collect release artifacts
+        id: art
+        shell: bash
+        env:
+          TARGET_DIR: ${{ steps.cfg.outputs.target }}
+          SUBTARGET_DIR: ${{ steps.cfg.outputs.subtarget }}
+          VARIANT: ${{ env.RELEASE_ONLY_VARIANT }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          bin="ib/${{ steps.cfg.outputs.ib_dir }}/bin/targets/${TARGET_DIR}/${SUBTARGET_DIR}"
+          echo "--- everything that was built ---"
+          find "$bin" -maxdepth 1 -type f -printf '%12s  %f\n' | sort -k2 || true
+
+          img="$(find "$bin" -maxdepth 1 -type f \
+                   -name "*-${VARIANT}.img.gz" ! -name '*squashfs*' \
+                   -printf '%f\n' | head -1)"
+          if [ -z "$img" ]; then
+            echo "::error::no ext4 ${VARIANT} image was produced"
+            exit 1
+          fi
+
+          cp -v "$bin/$img" out/
+          manifest="$(find "$bin" -maxdepth 1 -type f -name '*.manifest' -printf '%f\n' | head -1)"
+          [ -z "$manifest" ] || cp -v "$bin/$manifest" out/
+
+          cd out
+          sha256sum "$img" > "${img}.sha256"
+          bytes="$(stat -c%s "$img")"
+          {
+            echo "img=${img}"
+            echo "bytes=${bytes}"
+            echo "sha256=$(cut -d' ' -f1 "${img}.sha256")"
+          } >> "$GITHUB_OUTPUT"
+          echo "--- release payload ---"
+          ls -la
+
+      - name: Upload build records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: records-${{ steps.cfg.outputs.tag }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            out/*.manifest
+            out/*.sha256
+            ib/${{ steps.cfg.outputs.ib_dir }}/build.log
+
+      - name: Publish release
+        if: steps.cfg.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.cfg.outputs.tag }}
+          VER: ${{ steps.cfg.outputs.version }}
+          ARCH: ${{ steps.cfg.outputs.arch }}
+          TARGET_OUT: ${{ steps.cfg.outputs.target }}
+          SUBTARGET_OUT: ${{ steps.cfg.outputs.subtarget }}
+          PROFILE_OUT: ${{ steps.cfg.outputs.profile }}
+          SIZE_OUT: ${{ steps.cfg.outputs.rootfs_size }}
+          EXTRA_OUT: ${{ steps.cfg.outputs.extra_image_name }}
+          PKGS_OUT: ${{ steps.cfg.outputs.packages }}
+          IMG: ${{ steps.art.outputs.img }}
+          BYTES: ${{ steps.art.outputs.bytes }}
+          SHA: ${{ steps.art.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          human="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f MiB", b / 1048576 }')"
+          count="$(printf '%s\n' "$PKGS_OUT" | tr ' ' '\n' | grep -c '[^[:space:]]' || true)"
+
+          {
+            echo "OpenWrt ${VER} 的 x86/64 自建镜像，由官方 ImageBuilder 产出。"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| OpenWrt 版本 | ${VER} |"
+            echo "| target | ${TARGET_OUT}/${SUBTARGET_OUT} |"
+            echo "| profile | ${PROFILE_OUT} |"
+            echo "| 根文件系统 | ext4 |"
+            echo "| rootfs 分区 | ${SIZE_OUT} MiB |"
+            echo "| 镜像变体 | combined-efi（GPT + EFI 启动，整盘镜像） |"
+            echo "| 附加包数量 | ${count} |"
+            echo "| 文件 | ${IMG} |"
+            echo "| 大小 | ${human} |"
+            echo "| sha256 | ${SHA} |"
+            echo
+            echo "写入 U 盘或虚拟机磁盘后即可引导；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
+            echo "rootfs 分区保持 ${SIZE_OUT} MiB 不变，可从任意同规格自制镜像增量升级并保留配置。"
+          } > RELEASE_NOTES.md
+
+          cat RELEASE_NOTES.md
+          echo "-----------------------------"
+
+          title="OpenWrt ${VER} x86_64 (ext4 ${SIZE_OUT} MiB, combined-efi)"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists - replacing its asset"
+            gh release upload "$TAG" "out/${IMG}" --clobber
+            gh release edit "$TAG" --title "$title" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" "out/${IMG}" \
+              --title "$title" \
+              --notes-file RELEASE_NOTES.md
+          fi
+
+          echo "--- release summary ---"
+          gh release view "$TAG"
