@@ -251,6 +251,9 @@ jobs:
             exit 1
           fi
 
+          gzip -t "$bin/$img"
+          echo "gzip integrity OK: ${img}"
+
           cp -v "$bin/$img" out/
           manifest="$(find "$bin" -maxdepth 1 -type f -name '*.manifest' -printf '%f\n' | head -1)"
           [ -z "$manifest" ] || cp -v "$bin/$manifest" out/
@@ -262,6 +265,7 @@ jobs:
             echo "img=${img}"
             echo "bytes=${bytes}"
             echo "sha256=$(cut -d' ' -f1 "${img}.sha256")"
+            echo "manifest=${manifest}"
           } >> "$GITHUB_OUTPUT"
           echo "--- release payload ---"
           ls -la
@@ -291,7 +295,7 @@ jobs:
           PROFILE_OUT: ${{ steps.cfg.outputs.profile }}
           SIZE_OUT: ${{ steps.cfg.outputs.rootfs_size }}
           EXTRA_OUT: ${{ steps.cfg.outputs.extra_image_name }}
-          PKGS_OUT: ${{ steps.cfg.outputs.packages }}
+          MANIFEST: ${{ steps.art.outputs.manifest }}
           IMG: ${{ steps.art.outputs.img }}
           BYTES: ${{ steps.art.outputs.bytes }}
           SHA: ${{ steps.art.outputs.sha256 }}
@@ -299,7 +303,11 @@ jobs:
           set -euo pipefail
 
           human="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f MiB", b / 1048576 }')"
-          count="$(printf '%s\n' "$PKGS_OUT" | tr ' ' '\n' | grep -c '[^[:space:]]' || true)"
+
+          pkgcount="n/a"
+          if [ -n "${MANIFEST:-}" ] && [ -f "out/${MANIFEST}" ]; then
+            pkgcount="$(wc -l < "out/${MANIFEST}" | tr -d '[:space:]')"
+          fi
 
           {
             echo "OpenWrt ${VER} 的 x86/64 自建镜像，由官方 ImageBuilder 产出。"
@@ -312,7 +320,7 @@ jobs:
             echo "| 根文件系统 | ext4 |"
             echo "| rootfs 分区 | ${SIZE_OUT} MiB |"
             echo "| 镜像变体 | combined-efi（GPT + EFI 启动，整盘镜像） |"
-            echo "| 附加包数量 | ${count} |"
+            echo "| 已安装软件包 | ${pkgcount} 个 |"
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"
             echo "| sha256 | ${SHA} |"
