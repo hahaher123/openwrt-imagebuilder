@@ -305,8 +305,32 @@ jobs:
           fi
           img="${hits[0]}"
 
-          gzip -t "$bin/$img"
-          echo "gzip integrity OK: ${img}"
+          # 镜像尾部可能带 fwtool 元数据（由 append-metadata 写入）：
+          #   * x86 的 SUPPORTED_DEVICES 为空 ⇒ 不追加 ⇒ 纯 gzip 流，gzip -t 返回 0
+          #   * rockchip 的 SUPPORTED_DEVICES 有值 ⇒ 追加 ⇒ gzip 提示
+          #     "trailing garbage ignored" 并以 2 退出（但流本身仍然完整）
+          # 所以「rc=2 且明确说 decompression OK」不能当成损坏，否则 rockchip
+          # 这类设备级镜像会被永远判失败。
+          rc=0
+          gzip -t "$bin/$img" 2> gzip-check.err || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "gzip integrity OK: ${img}   (纯 gzip 流)"
+          elif [ "$rc" -eq 2 ] && grep -q 'decompression OK' gzip-check.err; then
+            echo "gzip integrity OK: ${img}   (gzip 流完整，尾部为 fwtool 元数据)"
+            sed 's/^/      /' gzip-check.err
+            # 注意用 >/dev/null 而不是 grep -q：-q 命中后会提前退出，
+            # 让上游 tail 收到 SIGPIPE，在 pipefail 下会把整条判定判成失败。
+            if tail -c 8192 "$bin/$img" | grep -a 'supported_devices' >/dev/null; then
+              echo "      尾部元数据含 supported_devices —— sysupgrade 可据此校验设备"
+            else
+              echo "::error::尾部有数据但不是 fwtool 元数据（未找到 supported_devices）"
+              exit 1
+            fi
+          else
+            echo "::error::gzip 完整性检查失败 (rc=${rc})"
+            cat gzip-check.err || true
+            exit 1
+          fi
 
           cp -v "$bin/$img" out/
           manifest="$(find "$bin" -maxdepth 1 -type f -name '*.manifest' -printf '%f\n' | head -1)"
