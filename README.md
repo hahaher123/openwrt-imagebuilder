@@ -131,8 +131,10 @@ LuCI 要有个 Web 服务器顶着。OpenWrt 默认是 uhttpd，本仓库的 **x
 + bootstrap 主题 + `rpcd-mod-rrdns`），差别只在 Web 这一层：LuCI 由 uwsgi 承接
 （`uwsgi` + `uwsgi-luci-support`，socket 为 `/var/run/luci-webui.socket`；文件上传下载等 cgi-io
 请求走 `/var/run/luci-cgi_io.socket`），nginx 负责 TLS 与静态资源。这些包都在官方源里，构建时
-自动解析进来，`nginx-ssl` 则显式钉住 —— 虚拟包 `nginx` 由 `nginx-ssl` 与 `nginx-full` 同时提供，
-不钉的话解析器可能挑到体积大得多的后者。
+自动解析进来。虚拟包 `nginx` 由 `nginx-ssl` 与 `nginx-full` 同时提供，其中 `nginx-ssl` 带
+`DEFAULT_VARIANT:=1` —— 打包系统据此写入 `provider_priority=100`，apk 解析时优先选它，所以
+`luci-nginx` 单独用也能装到 `nginx-ssl`；配置里仍**显式列出**它，是把变体钉死，避免上游改默认
+变体时镜像内容静默换成体积大得多的 `nginx-full`。
 
 **访问方式随之变化（仅 x86_64 目标）**：nginx 的出厂配置里 80 端口只把请求
 `302` 跳到 HTTPS，真正服务 LuCI 的是 443，证书是**首次启动时自动生成的自签名证书**。所以刷完
