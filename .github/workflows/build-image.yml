@@ -300,6 +300,11 @@ jobs:
             exit 0
           fi
 
+          # ⚠️ `. conf` 只是设 shell 变量、**不导出**，而下面的 python 读的是
+          # os.environ ⇒ 不显式 export 它会拿到空值，打印「CUSTOM_ASSETS 为空」
+          # 然后正常返回 0 —— 镜像里一个自建包都没有，却一路绿灯（真踩过）。
+          export CUSTOM_ASSETS ARCH_PACKAGES
+
           # ImageBuilder 根目录的 packages/ 是官方留给本地包的位置：把 .apk 放进去，
           # make image 会自动用 apk mkndx 建索引并装上（见 packages/README.md）。
           # 脚本取各仓库的 latest Release，校验每个包的 ADB v3 格式与目标架构。
@@ -310,6 +315,13 @@ jobs:
 
           # shellcheck source=/dev/null
           . ./custom-packages.env
+          # conf 声明了来源却一个包都没抓到，说明上面的通道又断了 —— 必须报错，
+          # 否则「Verify the custom packages are in the image」会因 custom_pkgs
+          # 为空被静默跳过，缺包永远暴露不出来。
+          if [ -z "${CUSTOM_PKGS:-}" ]; then
+            echo "::error::${ARCH} 声明了 CUSTOM_ASSETS，但没有抓到任何自建包"
+            exit 1
+          fi
           echo "custom_pkgs=${CUSTOM_PKGS}" >> "$GITHUB_OUTPUT"
           echo "--- 以下自建包会并入 PACKAGES ---"
           echo "${CUSTOM_PKGS}"
