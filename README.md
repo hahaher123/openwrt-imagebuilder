@@ -37,7 +37,8 @@ tag 形如 `v25.12.5-x86_64.20260920`（末尾是构建日期，同日多次构�
 
 出厂 LAN 地址由 `config/<配置>.conf` 的 `LAN_IP` 决定，写进镜像的
 `/etc/uci-defaults/99-lan-ip`，**首次启动时**生效（把 OpenWrt 默认的 `192.168.1.1` 换掉），
-所以刷完开机后管理页在 `http://192.168.100.1/`。
+所以刷完开机后管理页在 `http://192.168.100.1/`（x86_64 目标会跳到 `https://`，见
+「Web 服务」一节）。
 
 它只在该地址仍是出厂默认值时才动手：自己改过 LAN 地址的设备，升级后不会被冲回默认值。
 
@@ -98,7 +99,8 @@ sysupgrade -T <镜像>
 
 **两个目标共有**：
 
-* **LuCI**：`luci`、`luci-app-attendedsysupgrade`、`luci-proto-wireguard`
+* **LuCI**：`luci`（x86_64 用 `luci-nginx` + `nginx-ssl`，见「Web 服务」一节）、
+  `luci-app-attendedsysupgrade`、`luci-proto-wireguard`
 * **简体中文界面**：`luci-i18n-base-zh-cn`、`luci-i18n-firewall-zh-cn`、
   `luci-i18n-package-manager-zh-cn`、`luci-i18n-ttyd-zh-cn`、`luci-i18n-sqm-zh-cn`、
   `luci-i18n-unbound-zh-cn`、`luci-i18n-irqbalance-zh-cn`
@@ -114,6 +116,42 @@ sysupgrade -T <镜像>
 
 完整清单以 `config/<配置>.conf` 的 `PACKAGES` 与 `CUSTOM_ASSETS` 为准，或系统启动后执行
 `apk list --installed` 查看。
+
+### Web 服务：nginx 还是 uhttpd
+
+LuCI 要有个 Web 服务器顶着。OpenWrt 默认是 uhttpd，本仓库的 **x86_64 目标改用 nginx**：
+
+| 目标 | Web 服务 | 相关包 |
+| --- | --- | --- |
+| x86_64 | **nginx** | `luci-nginx` + `nginx-ssl`，并显式带上 `-uhttpd -uhttpd-mod-ubus` |
+| r2s | uhttpd（OpenWrt 默认） | `luci` 自带的 `uhttpd` + `uhttpd-mod-ubus` |
+
+两者不能共存：uhttpd 与 nginx 都要占 80/443 端口。`luci-nginx` 是官方 collection，**内容与
+`luci` 完全等价**（同样是 `luci-app-package-manager` + `luci-mod-admin-full` + `luci-app-firewall`
++ bootstrap 主题 + `rpcd-mod-rrdns`），差别只在 Web 这一层：LuCI 由 uwsgi 承接
+（`uwsgi` + `uwsgi-luci-support`，socket 为 `/var/run/luci-webui.socket`；文件上传下载等 cgi-io
+请求走 `/var/run/luci-cgi_io.socket`），nginx 负责 TLS 与静态资源。这些包都在官方源里，构建时
+自动解析进来，`nginx-ssl` 则显式钉住 —— 虚拟包 `nginx` 由 `nginx-ssl` 与 `nginx-full` 同时提供，
+不钉的话解析器可能挑到体积大得多的后者。
+
+**访问方式随之变化（仅 x86_64 目标）**：nginx 的出厂配置里 80 端口只把请求
+`302` 跳到 HTTPS，真正服务 LuCI 的是 443，证书是**首次启动时自动生成的自签名证书**。所以刷完
+开机后访问 `https://192.168.100.1/`（输入 `http://` 会被跳过去），浏览器会提示证书不受信任 ——
+自签证书的正常现象，确认继续即可。访问范围由 `/etc/nginx/restrict_locally` 限定在私有网段
+（`192.168.0.0/16`、`10.0.0.0/8`、`172.16.0.0/12` 等），公网访问不到。
+
+想改回「纯 HTTP、不跳转、不弹证书警告」，在设备上执行：
+
+```sh
+uci add_list nginx._lan.listen='80'
+uci add_list nginx._lan.listen='[::]:80'
+uci delete nginx._redirect2ssl
+uci commit nginx
+/etc/init.d/nginx restart
+```
+
+反过来，想让 r2s 也用 nginx，把 `config/r2s.conf` 的 `luci` 换成 `luci-nginx nginx-ssl`，并在
+`PACKAGES` 里加上 `-uhttpd -uhttpd-mod-ubus` 即可。
 
 ### 自建包与第三方包
 
