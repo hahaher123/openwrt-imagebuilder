@@ -20,6 +20,10 @@ ImageBuilder 根目录的 `packages/` 是官方留给本地包的目录：把 .a
 校验：每个包都必须是 apk-tools 3 的 ADB 容器（OpenWrt 25.12 格式），
 且 arch 必须是 noarch 或等于 ARCH_PACKAGES —— 资产名里没带架构时不至于拿错。
 
+落盘名一律按包内元数据重拼成 `${name}-${version}.apk`，不用资产原名：
+apk 装机时正是用这个名字去 packages/ 里找文件，资产名多带了架构后缀
+（如 mihomo-1.19.31-r2_x86_64.apk）就会「索引里有、文件找不到」而装不上。
+
 用法::
 
     fetch-custom-packages.py --dest ib/<dir>/packages [--out-env FILE]
@@ -82,6 +86,25 @@ def latest_release(repo, token):
 
 _ARCH_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _NEXT_FIELD_RE = re.compile(r"^[ -~]{1,64}$")
+
+# 落盘文件名只能由这两段拼出来，顺手挡掉畸形元数据
+_PKGNAME_RE = re.compile(r"^[a-z0-9][a-z0-9+._-]{0,127}$")
+_VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9._+~-]{0,127}$")
+
+
+def canonical_name(meta):
+    """apk 会用这个名字去 packages/ 里找文件，别的名字等于没放。
+
+    索引里的 name/version 是 `apk mkndx` 从包内部抄的（mkndx_parse_v3meta
+    把 pckg 里的 pkginfo 原样拷进索引），而装机时 apk 用
+    `${name}-${version}.apk` 拼出文件名（src/context.c 的 default_pkgname_spec，
+    本地目录仓库走的正是这条），拼出来的文件不在就 ENOENT →
+    APKE_INDEX_STALE「package mentioned in index not found」。
+
+    所以不能用资产原名：各仓库的发布命名不统一，openwrt-mihomo 就带
+    _x86_64 之类架构后缀（同一个 Release 里放多架构资产）。
+    """
+    return "%s-%s.apk" % (meta["name"], meta["version"])
 
 
 def adb_payload(raw, where):
@@ -257,17 +280,26 @@ def main(argv=None):
                     failures.append("%s：arch=%s 既不是 noarch 也不是 %s"
                                     % (where, meta["arch"], arch))
                     continue
-                if fname in written:
-                    failures.append("%s：文件名与 %s 冲突" % (where, written[fname]))
+
+                if not _PKGNAME_RE.match(meta["name"]) or not _VERSION_RE.match(meta["version"]):
+                    failures.append("%s：元数据里的 name/version 不适合做文件名"
+                                    "（name=%s version=%s）"
+                                    % (where, meta["name"], meta["version"]))
                     continue
 
-                path = os.path.join(args.dest, fname)
+                canon = canonical_name(meta)
+                if canon in written:
+                    failures.append("%s：%s 与 %s 冲突" % (where, canon, written[canon]))
+                    continue
+
+                path = os.path.join(args.dest, canon)
                 with open(path, "wb") as fh:
                     fh.write(data)
-                written[fname] = where
+                written[canon] = where
                 pkgnames.append(meta["name"])
-                print("      ✓ %-46s %8d B  name=%s version=%s arch=%s"
-                      % (fname, len(data), meta["name"], meta["version"], meta["arch"]))
+                note = "" if canon == fname else "  ← 资产原名 %s" % fname
+                print("      ✓ %-46s %8d B  name=%s version=%s arch=%s%s"
+                      % (canon, len(data), meta["name"], meta["version"], meta["arch"], note))
 
     print()
     print("=" * 74)
