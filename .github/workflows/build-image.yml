@@ -284,6 +284,71 @@ jobs:
           echo "--- target profiles ---"
           ( cd "ib/${IB_DIR}" && make info 2>/dev/null | sed -n '1,30p' ) || true
 
+      - name: Patch ImageBuilder
+        # 修 IB 的一个变量泄漏 bug（openwrt-25.12 与 main 分支的代码完全一样）：
+        #
+        #   define FormatPackages
+        #   $(strip $(foreach pkg,$(strip $(subst ",,$(1))),
+        #     $(eval pkg_name:=$(firstword $(subst =, ,$(pkg))))
+        #     $(if $(findstring =,$(pkg)),$(eval pkg_ver:==$(lastword $(subst =, ,$(pkg)))))
+        #     $(pkg_name)$(call GetABISuffix,$(pkg_name))$(pkg_ver)
+        #   ))
+        #   endef
+        #
+        # pkg_ver 从不复位：列表里出现第一处 `pkg=version` 之后，**后面每个没有 `=`
+        # 的条目都会继承那个版本**。BUILD_PACKAGES 的顺序是
+        # [USER_PACKAGES] + [排序后的默认包] + [base-files/libc/kernel]，
+        # 而自建包是带版本 pin 的（见 scripts/fetch-custom-packages.py），于是排在
+        # 后面的整个默认包集都被染上最后一个 pin 的版本，apk 直接报
+        #   ERROR: unable to select packages:
+        #     e2fsprogs-1.47.3-r1: breaks: world[e2fsprogs=1.5.2-r1]
+        # （实测 run 35496130706；1.5.2-r1 正是字母序最后一个 pin oxidns 的版本）。
+        #
+        # 补一句复位即恢复原意。锚点必须唯一命中，对不上就报错退出 ——
+        # 免得上游改了这段之后补丁静默失效。上游修好后本步骤可直接删掉。
+        shell: bash
+        env:
+          IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
+        run: |
+          set -euo pipefail
+          makefile="ib/${IB_DIR}/Makefile"
+          if [ ! -f "$makefile" ]; then
+            echo "::error::找不到 $makefile"
+            exit 1
+          fi
+          python3 - "$makefile" <<'PYEOF'
+          import io
+          import sys
+
+          path = sys.argv[1]
+          with io.open(path, encoding="utf-8") as fh:
+              lines = fh.readlines()
+
+          anchor = "$(eval pkg_name:=$(firstword $(subst =, ,$(pkg))))"
+          hits = [i for i, line in enumerate(lines) if anchor in line]
+          if len(hits) != 1:
+              sys.exit("::error::在 %s 里 %d 次命中 FormatPackages 的锚点（应为 1 次）—— "
+                       "IB 的 Makefile 变了，需要重新核对 FormatPackages 再改本步骤"
+                       % (path, len(hits)))
+
+          i = hits[0]
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          if any("pkg_ver:=)" in line for line in lines[i:i + 3]):
+              print("已经补过 pkg_ver 复位，跳过")
+          else:
+              lines.insert(i + 1, indent + "$(eval pkg_ver:=)\n")
+              with io.open(path, "w", encoding="utf-8", newline="") as fh:
+                  fh.writelines(lines)
+              print("已插入 pkg_ver 复位：%s" % path)
+          PYEOF
+          echo "--- 打过补丁的 FormatPackages ---"
+          sed -n '/^define FormatPackages/,/^endef/p' "$makefile"
+          patched="$(sed -n '/^define FormatPackages/,/^endef/p' "$makefile" | grep -c 'pkg_ver:=)')"
+          if [ "$patched" -lt 1 ]; then
+            echo "::error::补丁没生效（FormatPackages 里没看到 pkg_ver 复位）"
+            exit 1
+          fi
+
       - name: Fetch packages from our own repositories
         id: custom
         shell: bash

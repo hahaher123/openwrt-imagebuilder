@@ -134,6 +134,9 @@ sysupgrade -T <镜像>
 * 并入 `PACKAGES` 时**钉死版本**（`包名=版本`）：`packages/` 只是 apk 的又一个仓库，
   同名包若在官方源里也有、且版本号排序更高，apk 会选官方那个。构建末段会拿 manifest
   逐个核对「名字 + 版本」，被盖住会直接报错而不是静默装成别的版本。
+  为此构建时会先给 ImageBuilder 打一个一行补丁（它自带的 `FormatPackages` 会让
+  版本后缀泄漏到后续所有包上，导致「unable to select packages」）；
+  上游修好后该步骤可删，补丁锚点对不上时构建会直接报错。
 * 取的是各仓库的**最新 Release**，这些包的版本因此由上游决定、不由本仓库固定。其中
   `sirpdboy/luci-app-ddns-go` 是第三方来源，它的 `SNAPSHOT-*` 资产会随上游重建而变动。
 
