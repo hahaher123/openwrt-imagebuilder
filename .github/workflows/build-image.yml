@@ -351,6 +351,15 @@ jobs:
           # 仍然补上 0755，免得将来换成直接执行时踩坑。
           chmod 0755 "$target"
 
+          # 两道静态守卫：语法错、或误用 exit/return（被 source 时会牵连调用方
+          # 子 shell，且末尾返回非 0 会让脚本留在原地反复重跑）都会在设备上才暴露，
+          # 所以在这里就拦住。
+          sh -n "$target"
+          if grep -nE '^[[:space:]]*(exit|return)([[:space:]]|$)' "$target"; then
+            echo "::error::uci-defaults 脚本不能使用 exit / return（它会被 source 执行）"
+            exit 1
+          fi
+
           echo "--- 覆盖层内容 ---"
           find "$dst" -type f -printf '%M  %P\n' | sort
           echo "--- ${target} ---"
@@ -412,7 +421,9 @@ jobs:
           echo "found: ${f}"
           echo "--- 内容 ---"
           sed 's/^/    /' "$f"
-          if ! grep -q "network.lan.ipaddr='${LAN_IP_IN}'" "$f"; then
+          # 覆盖层写的是 `add_list network.lan.ipaddr="<地址>/${prefix}"`：
+          # 形态必须与 config_generate 一致（list + CIDR），所以这里只断言地址部分。
+          if ! grep -q "network.lan.ipaddr=\"${LAN_IP_IN}/" "$f"; then
             echo "::error::覆盖层里的 LAN 地址不是 ${LAN_IP_IN}"
             exit 1
           fi

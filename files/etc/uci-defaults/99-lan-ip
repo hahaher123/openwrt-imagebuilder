@@ -8,17 +8,41 @@
 #   * 不写 exit / return —— 被 source 时它们会牵连调用方；
 #   * 末尾落在 if 语句上，保证返回 0，脚本才会被标记为已执行并删除。
 #
+# 时机：镜像里并不存在 /etc/config/network —— 它是首次启动时生成的。
+# 生成者是 preinit 阶段的 /lib/preinit/82_config_generate（它调 /bin/board_detect
+# 产出 /etc/board.json，再调 /bin/config_generate 写出网络配置），preinit 早于
+# /etc/init.d/boot，所以到这里 network.lan 一定已经存在。
+#
 # 作用：把出厂 LAN 地址从 OpenWrt 默认的 192.168.1.1 改成 config/<arch>.conf 里
-# LAN_IP 指定的地址 —— 构建时会把下面那行赋值里的占位符替换成实际值。
+# LAN_IP 指定的地址；下面赋值语句里的占位符在构建时会被替换成实际值。
+#
+# 关键：config_generate 写出的 LAN 地址是「list + CIDR 前缀」，形如
+#     list ipaddr '192.168.1.1/24'
+# 而不是 option ipaddr '192.168.1.1'（见 config_generate 里的
+# `add_list network.$1.ipaddr='$ipad/$prefix'`）。所以比较前必须剥掉 /NN，
+# 否则判据永远不成立、脚本会静默地什么都不做。
 
+section="$(uci -q get network.lan)"
+proto="$(uci -q get network.lan.proto)"
 cur="$(uci -q get network.lan.ipaddr)"
 
-# 只在地址仍是出厂默认（或压根没设）时才改。
-#
-# 为什么需要这层判断：sysupgrade 保留配置升级时，/etc/config/* 会保留，但
+# uci get 对 list 返回空格分隔的全部值，取第一项；再剥掉 CIDR 前缀。
+first="${cur%% *}"
+addr="${first%%/*}"
+
+# 只在仍是「原厂状态」时才改：lan 存在、且仍是 static、且地址仍是出厂默认。
+# 为什么需要这层判断：sysupgrade 保留配置升级时 /etc/config/* 会保留，但
 # /etc/uci-defaults/ 不在保留清单里 —— 新镜像里的本脚本会重新落回该目录并再执行一次。
-# 不加判断的话，每次升级都会把用户自己设过的 LAN 地址冲回 __LAN_IP__。
-if [ -z "$cur" ] || [ "$cur" = "192.168.1.1" ]; then
-	uci -q set network.lan.ipaddr='__LAN_IP__'
-	uci -q commit network
+# 不加判断的话，每次升级都会把用户自己设过的 LAN 地址冲回出厂值。
+if [ "$section" = "interface" ] && [ "$proto" = "static" ]; then
+	if [ -z "$addr" ] || [ "$addr" = "192.168.1.1" ]; then
+		# 沿用 OpenWrt 自己算出的前缀长度，保持与生成结果同形态；取不到就用 /24。
+		prefix="${first##*/}"
+		case "$prefix" in
+			'' | *[!0-9]*) prefix=24 ;;
+		esac
+		uci -q delete network.lan.ipaddr
+		uci -q add_list network.lan.ipaddr="__LAN_IP__/${prefix}"
+		uci -q commit network
+	fi
 fi
