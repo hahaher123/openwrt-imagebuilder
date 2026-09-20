@@ -305,7 +305,24 @@ jobs:
         # （实测 run 35496130706；1.5.2-r1 正是字母序最后一个 pin oxidns 的版本）。
         #
         # 补一句复位即恢复原意。锚点必须唯一命中，对不上就报错退出 ——
-        # 免得上游改了这段之后补丁静默失效。上游修好后本步骤可直接删掉。
+        # 免得上游改了这段之后补丁静默失效。上游修好后本补丁可直接删掉。
+        #
+        # 补丁 2：APK 变量加全局 --force-overwrite。
+        #
+        # 自建 luci-app-natmap 是全家桶设计：自带 etc/config/natmap 与
+        # etc/init.d/natmap（插件体系由它自己的 init 脚本驱动），二进制则靠
+        # LUCI_DEPENDS 的 +natmap 从官方源拉。官方 natmap 包同样拥有这两个
+        # 文件，而 apk v3 对跨包文件覆盖是硬错误：
+        #   ERROR: luci-app-natmap-1.5.10-r3: trying to overwrite
+        #   etc/config/natmap owned by natmap-20260214-r1.（实测 run 35496363324）
+        # apk v3 的正道是包元数据里声明 replaces（package.c 的
+        # apk_pkg_replaces_file：声明方可静默接管文件，两种安装顺序都不报错），
+        # 但 OpenWrt 打包系统（package-pack.mk 的 apk mkpkg 调用）不输出
+        # replaces 字段，SDK 编出的包带不上 —— 只能在安装侧放行。
+        # 依赖顺序保证 natmap 先于 luci-app-natmap 解包，冲突时后者（我们的
+        # 文件）赢；冲突从错误降级为 warning（日志里仍可见）。代价：今后任何
+        # 包间文件冲突都不再阻断构建，包级错装仍由 manifest 校验（名字+版本）
+        # 兜底。若以后自建包都能自带 replaces 元数据，本补丁可删。
         shell: bash
         env:
           IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
@@ -324,28 +341,51 @@ jobs:
           with io.open(path, encoding="utf-8") as fh:
               lines = fh.readlines()
 
-          anchor = "$(eval pkg_name:=$(firstword $(subst =, ,$(pkg))))"
-          hits = [i for i, line in enumerate(lines) if anchor in line]
-          if len(hits) != 1:
-              sys.exit("::error::在 %s 里 %d 次命中 FormatPackages 的锚点（应为 1 次）—— "
-                       "IB 的 Makefile 变了，需要重新核对 FormatPackages 再改本步骤"
-                       % (path, len(hits)))
+          changed = False
 
-          i = hits[0]
+          def sole(anchor, what):
+              hits = [i for i, line in enumerate(lines) if anchor in line]
+              if len(hits) != 1:
+                  sys.exit("::error::在 %s 里 %d 次命中 %s 的锚点（应为 1 次）—— "
+                           "IB 的 Makefile 变了，需要重新核对再改本步骤"
+                           % (path, len(hits), what))
+              return hits[0]
+
+          # 补丁 1：FormatPackages 的 pkg_ver 复位（变量泄漏，见步骤头注释）
+          i = sole("$(eval pkg_name:=$(firstword $(subst =, ,$(pkg))))", "FormatPackages")
           indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
           if any("pkg_ver:=)" in line for line in lines[i:i + 3]):
-              print("已经补过 pkg_ver 复位，跳过")
+              print("补丁 1（pkg_ver 复位）已存在，跳过")
           else:
               lines.insert(i + 1, indent + "$(eval pkg_ver:=)\n")
+              changed = True
+              print("补丁 1：已插入 pkg_ver 复位")
+
+          # 补丁 2：apk 全局 --force-overwrite（natmap 文件冲突，见步骤头注释）
+          j = sole("--cache-dir $(DL_DIR)", "APK 变量")
+          if "--force-overwrite" in lines[j]:
+              print("补丁 2（--force-overwrite）已存在，跳过")
+          else:
+              lines[j] = lines[j].rstrip("\n") + " --force-overwrite\n"
+              changed = True
+              print("补丁 2：APK 变量尾行已追加 --force-overwrite")
+
+          # 任一锚点失配都会在上面直接退出 —— 到这里的改动才落盘，保证原子性
+          if changed:
               with io.open(path, "w", encoding="utf-8", newline="") as fh:
                   fh.writelines(lines)
-              print("已插入 pkg_ver 复位：%s" % path)
           PYEOF
           echo "--- 打过补丁的 FormatPackages ---"
           sed -n '/^define FormatPackages/,/^endef/p' "$makefile"
+          echo "--- 打过补丁的 APK 变量 ---"
+          sed -n '/^APK:=/,/^$/p' "$makefile"
           patched="$(sed -n '/^define FormatPackages/,/^endef/p' "$makefile" | grep -c 'pkg_ver:=)')"
           if [ "$patched" -lt 1 ]; then
-            echo "::error::补丁没生效（FormatPackages 里没看到 pkg_ver 复位）"
+            echo "::error::补丁 1 没生效（FormatPackages 里没看到 pkg_ver 复位）"
+            exit 1
+          fi
+          if ! grep -q -- '--cache-dir $(DL_DIR) --force-overwrite$' "$makefile"; then
+            echo "::error::补丁 2 没生效（APK 变量尾行没有 --force-overwrite）"
             exit 1
           fi
 

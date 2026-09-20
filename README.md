@@ -137,6 +137,10 @@ sysupgrade -T <镜像>
   为此构建时会先给 ImageBuilder 打一个一行补丁（它自带的 `FormatPackages` 会让
   版本后缀泄漏到后续所有包上，导致「unable to select packages」）；
   上游修好后该步骤可删，补丁锚点对不上时构建会直接报错。
+  同一补丁步还会给 apk 加全局 `--force-overwrite`：自建 `luci-app-natmap` 自带
+  `etc/config/natmap` 与 `etc/init.d/natmap`，与官方 `natmap` 包撞文件（apk 对
+  跨包覆盖是硬错误，而包元数据 `replaces` 是 OpenWrt 打包系统不输出的字段，
+  只能在安装侧放行）。依赖顺序保证我们的包后解包、冲突时我们的文件赢。
 * 取的是各仓库的**最新 Release**，这些包的版本因此由上游决定、不由本仓库固定。其中
   `sirpdboy/luci-app-ddns-go` 是第三方来源，它的 `SNAPSHOT-*` 资产会随上游重建而变动。
 
