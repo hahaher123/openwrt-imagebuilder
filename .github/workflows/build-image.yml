@@ -93,6 +93,7 @@ jobs:
           IN_PKGS: ${{ inputs.packages }}
           IN_LAN_IP: ${{ inputs.lan_ip }}
           IN_PUBLISH: ${{ inputs.publish }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -195,7 +196,32 @@ jobs:
           ib_name="openwrt-imagebuilder-${ver}-${IB_ARCH_TAG}.${IB_HOST_TAG}.tar.zst"
           ib_dir="${ib_name%.tar.zst}"
           ib_url="${IB_MIRROR}/releases/${ver}/targets/${TARGET}/${SUBTARGET}/${ib_name}"
-          tag="v${ver}-${arch}"
+
+          # ---- 发布形态：每次构建产出**一条新的** Release ----
+          # tag 里带构建日期（北京时间），所以每次构建都会在 Releases 列表顶部冒出
+          # 一条看得见的新版本，而不是像以前那样覆盖同一条、让人以为没更新过。
+          # 镜像文件名保持不变，装机脚本/书签不受影响。
+          # 同一天连续构建时追加 -2 / -3 … 序号，避免又退回「覆盖同一条」。
+          build_date="$(TZ='Asia/Shanghai' date +%Y%m%d)"
+          tag="v${ver}-${arch}.${build_date}"
+          if [ "$publish" = "true" ]; then
+            if ! command -v gh >/dev/null 2>&1; then
+              echo "::error::publish=true 却找不到 gh CLI，无法确认 ${tag} 是否已被占用"
+              exit 1
+            fi
+            n=1
+            while gh release view "$tag" >/dev/null 2>&1; do
+              n=$((n + 1))
+              if [ "$n" -gt 50 ]; then
+                echo "::error::${build_date} 已有 50 条 ${arch} 发布，先清理旧版本再构建"
+                exit 1
+              fi
+              tag="v${ver}-${arch}.${build_date}-${n}"
+            done
+            if [ "$n" -gt 1 ]; then
+              echo "note: 本日已有 $((n - 1)) 条 ${arch} 发布，本次用 ${tag}"
+            fi
+          fi
 
           {
             echo "version=${ver}"
@@ -718,6 +744,10 @@ jobs:
 
           human="$(awk -v b="$BYTES" 'BEGIN { printf "%.1f MiB", b / 1048576 }')"
 
+          build_time="$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')"
+          commit_short="$(printf '%s' "${GITHUB_SHA:-unknown}" | cut -c1-7)"
+          run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
+
           pkgcount="n/a"
           if [ -n "${MANIFEST:-}" ] && [ -f "out/${MANIFEST}" ]; then
             pkgcount="$(wc -l < "out/${MANIFEST}" | tr -d '[:space:]')"
@@ -728,6 +758,7 @@ jobs:
             echo
             echo "| 项 | 值 |"
             echo "| --- | --- |"
+            echo "| 构建时间 | ${build_time} (UTC+8) |"
             echo "| OpenWrt 版本 | ${VER} |"
             echo "| target | ${TARGET_OUT}/${SUBTARGET_OUT} |"
             echo "| profile | ${PROFILE_OUT} |"
@@ -739,6 +770,8 @@ jobs:
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"
             echo "| sha256 | ${SHA} |"
+            echo "| 构建提交 | ${commit_short} |"
+            echo "| 构建记录 | ${run_url} |"
             echo
             echo "${FLASH_HINT_OUT}；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
             echo "rootfs 分区保持 ${SIZE_OUT} MiB 不变，可从任意同规格自制镜像增量升级并保留配置。"
@@ -762,3 +795,26 @@ jobs:
 
           echo "--- release summary ---"
           gh release view "$TAG"
+
+          # ---- 只保留最近 ${KEEP} 条本架构的「日期版」发布 ----
+          # 只认 v<版本>-<架构>.<8 位日期> 形态，且版本/架构都要匹配，所以不会碰到
+          # 另一个架构（r2s）的发布，也不会碰历史上那个无日期的固定 tag。
+          # 清理失败只告警：镜像这时已经发布出去了，不该因此把整条构建判为失败。
+          KEEP=5
+          kept=0
+          while read -r old; do
+            [ -n "$old" ] || continue
+            case "$old" in
+              "v${VER}-${ARCH}."[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|\
+              "v${VER}-${ARCH}."[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*)
+                kept=$((kept + 1))
+                if [ "$kept" -gt "$KEEP" ]; then
+                  echo "pruning old release ${old}"
+                  gh release delete "$old" --yes --cleanup-tag \
+                    || echo "::warning::删除旧发布 ${old} 失败，跳过"
+                fi
+                ;;
+            esac
+          done < <(gh release list --limit 100 --json tagName,createdAt \
+                     --jq '.[] | "\(.createdAt) \(.tagName)"' | sort -r | awk '{print $2}')
+          echo "kept ${kept} release(s) for ${ARCH} (newest ${KEEP})"
