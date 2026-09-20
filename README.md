@@ -30,7 +30,14 @@
 | 根文件系统 | ext4 | ext4 |
 | 内核分区 | 16 MiB | 16 MiB |
 | rootfs 分区 | 1024 MiB | 1024 MiB |
+| 出厂 LAN 地址 | `192.168.100.1` | `192.168.100.1` |
 | 引导 | GRUB（EFI） | u-boot |
+
+出厂 LAN 地址由 `config/<配置>.conf` 的 `LAN_IP` 决定，写进镜像的
+`/etc/uci-defaults/99-lan-ip`，**首次启动时**生效（把 OpenWrt 默认的 `192.168.1.1` 换掉），
+所以刷完开机后管理页在 `http://192.168.100.1/`。
+
+它只在该地址仍是出厂默认值时才动手：自己改过 LAN 地址的设备，升级后不会被冲回默认值。
 
 官方 x86 镜像的 rootfs 分区是 104 MiB（同版本 13.2 MiB 的压缩体积），官方 R2S 镜像也是
 104 MiB。这里统一放大到 **1024 MiB**，代价是多占约 6 MiB 压缩体积，换来一块够用的可写分区。
@@ -58,6 +65,9 @@ gunzip -c openwrt-<版本>-ext4-1g-rockchip-armv8-friendlyarm_nanopi-r2s-ext4-sy
 ```
 
 ### 从已有 OpenWrt 升级
+
+刷入后 LAN 地址保持为原来的设置；只有仍停在出厂默认 `192.168.1.1` 的设备会被改成上面的出厂
+LAN 地址。
 
 ```sh
 sysupgrade openwrt-<版本>-<文件名标记>-<target>-<profile>-<变体>.img.gz
@@ -108,19 +118,20 @@ sysupgrade -T <镜像>
 
 ```sh
 VERSION="25.12.5"
-ARCH="r2s"
+ARCH="x86_64"
 ```
 
 * **换 OpenWrt 版本** → 改 `VERSION` 一行。
 * **换目标** → 改 `ARCH` 一行，取值是 `config/<配置>.conf` 的文件名（`x86_64` 或 `r2s`，
   将来新增目标就照现有文件复制一份改内容）。
-* **换包集 / rootfs 分区大小** → 改 `config/<配置>.conf` 里对应的一行。
+* **换包集 / rootfs 分区大小 / 出厂 LAN 地址** → 改 `config/<配置>.conf` 里对应的一行
+  （`PACKAGES` / `ROOTFS_SIZE` / `LAN_IP`）。
 
 改完 push 到 `main` 即自动重建，并把镜像发到 Release `v<版本>-<配置>`；同名 Release 只替换
 资产与说明，不新建。
 
-不改仓库也可以：手动触发构建，在输入框里临时指定版本号、配置、分区大小或包集，留空即取
-`config/build.conf`（临时指定的值不会写回仓库）。
+不改仓库也可以：手动触发构建，在输入框里临时指定版本号、配置、profile、分区大小、出厂 LAN
+地址或包集，留空即取 `config/` 下的配置（临时指定的值不会写回仓库）。
 
 ## 许可
 

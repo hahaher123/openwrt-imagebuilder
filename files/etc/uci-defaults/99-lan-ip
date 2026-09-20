@@ -1,0 +1,24 @@
+#!/bin/sh
+# 由 openwrt-imagebuilder 的 FILES 覆盖层带进镜像，设备首次启动时执行一次。
+#
+# 执行方式见官方 package/base-files/files/etc/init.d/boot：
+#     ( . "./$(basename $file)" ) && applied="$applied $file"
+#     uci commit; sync; rm -f $applied
+# 也就是「在子 shell 里被 source 一次，成功则删掉」。所以这里：
+#   * 不写 exit / return —— 被 source 时它们会牵连调用方；
+#   * 末尾落在 if 语句上，保证返回 0，脚本才会被标记为已执行并删除。
+#
+# 作用：把出厂 LAN 地址从 OpenWrt 默认的 192.168.1.1 改成 config/<arch>.conf 里
+# LAN_IP 指定的地址 —— 构建时会把下面那行赋值里的占位符替换成实际值。
+
+cur="$(uci -q get network.lan.ipaddr)"
+
+# 只在地址仍是出厂默认（或压根没设）时才改。
+#
+# 为什么需要这层判断：sysupgrade 保留配置升级时，/etc/config/* 会保留，但
+# /etc/uci-defaults/ 不在保留清单里 —— 新镜像里的本脚本会重新落回该目录并再执行一次。
+# 不加判断的话，每次升级都会把用户自己设过的 LAN 地址冲回 __LAN_IP__。
+if [ -z "$cur" ] || [ "$cur" = "192.168.1.1" ]; then
+	uci -q set network.lan.ipaddr='__LAN_IP__'
+	uci -q commit network
+fi

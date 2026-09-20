@@ -6,10 +6,12 @@ name: Build OpenWrt image
 #
 # 默认构建目标（版本号 + 架构）在整个仓库里只有一处定义：config/build.conf。
 # 改那一个文件的两行，push 后就会重编并覆盖 Release；本文件无需再动。
-# 与 target 相关的规格（IB 包名 tag、profile、rootfs 尺寸、要发布的产物变体名、
-# Release 文案）全部在 config/<arch>.conf 里 —— 各 target 的产物形态不同
-# （x86 出 ext4-combined-efi，rockchip 出 ext4-sysupgrade），所以本文件里
-# 不出现任何具体变体名或架构名。
+# 与 target 相关的规格（IB 包名 tag、profile、rootfs 尺寸、出厂 LAN 地址、
+# 要发布的产物变体名、Release 文案）全部在 config/<arch>.conf 里 —— 各 target
+# 的产物形态不同（x86 出 ext4-combined-efi，rockchip 出 ext4-sysupgrade），
+# 所以本文件里不出现任何具体变体名或架构名。
+# files/ 是打进镜像的覆盖层（ImageBuilder 的 FILES=<dir>），里面的 __LAN_IP__
+# 占位符在构建时替换成 config/<arch>.conf 的 LAN_IP。
 # 注意：Actions 不允许 workflow_dispatch 的 default / options 引用变量或文件，
 # 所以这两项只能留空，值统一由 build.conf 决定。
 on:
@@ -31,6 +33,10 @@ on:
         description: "rootfs partition size in MiB (blank = use config default)"
         required: false
         default: ""
+      lan_ip:
+        description: "Default LAN address baked into the image (blank = use config default)"
+        required: false
+        default: ""
       extra_image_name:
         description: "EXTRA_IMAGE_NAME, the filename tag (blank = use config default)"
         required: false
@@ -48,6 +54,7 @@ on:
     branches: [main]
     paths:
       - "config/**"
+      - "files/**"
       - ".github/workflows/build-image.yml"
 
 permissions:
@@ -79,6 +86,7 @@ jobs:
           IN_SIZE: ${{ inputs.rootfs_size }}
           IN_EXTRA: ${{ inputs.extra_image_name }}
           IN_PKGS: ${{ inputs.packages }}
+          IN_LAN_IP: ${{ inputs.lan_ip }}
           IN_PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
@@ -125,7 +133,7 @@ jobs:
           # 所以它跟其它规格一样由 config/<arch>.conf 决定，不再写死在本文件里。
           for v in TARGET SUBTARGET ARCH_PACKAGES IB_ARCH_TAG IB_HOST_TAG PROFILE \
                    ROOTFS_SIZE ROOTFS_FS EXTRA_IMAGE_NAME RELEASE_VARIANT \
-                   VARIANT_DESC FLASH_HINT PACKAGES; do
+                   VARIANT_DESC FLASH_HINT LAN_IP PACKAGES; do
             eval "val=\${${v}:-}"
             if [ -z "$val" ]; then
               echo "::error::${conf} is missing required variable ${v}"
@@ -147,6 +155,24 @@ jobs:
 
           extra="$(printf '%s' "${IN_EXTRA:-}" | tr -d '[:space:]')"
           [ -n "$extra" ] || extra="$EXTRA_IMAGE_NAME"
+
+          lan_ip="$(printf '%s' "${IN_LAN_IP:-}" | tr -d '[:space:]')"
+          [ -n "$lan_ip" ] || lan_ip="$LAN_IP"
+          if [ -z "$lan_ip" ]; then
+            echo "::error::no LAN_IP: workflow input is empty and ${conf} has no LAN_IP"
+            exit 1
+          fi
+          # 这个值会被写进 files/etc/uci-defaults/99-lan-ip（单引号赋值），
+          # 必须是干净的 IPv4 字面量，否则会写出语法坏掉的脚本或注入内容。
+          if ! printf '%s' "$lan_ip" | awk -F. '
+                NF != 4 { exit 1 }
+                {
+                  for (i = 1; i <= 4; i++)
+                    if ($i !~ /^[0-9][0-9]{0,2}$/ || $i + 0 > 255) exit 1
+                }'; then
+            echo "::error::LAN_IP is not a valid IPv4 address: '${lan_ip}'"
+            exit 1
+          fi
 
           pkgs="$(printf '%s' "${IN_PKGS:-}" | tr '\n\r\t' '   ' | tr -s ' ')"
           [ -n "$pkgs" ] || pkgs="$PACKAGES"
@@ -174,6 +200,7 @@ jobs:
             echo "profile=${profile}"
             echo "rootfs_size=${size}"
             echo "extra_image_name=${extra}"
+            echo "lan_ip=${lan_ip}"
             echo "rootfs_fs=${ROOTFS_FS}"
             echo "release_variant=${RELEASE_VARIANT}"
             echo "variant_desc=${VARIANT_DESC}"
@@ -197,6 +224,7 @@ jobs:
           echo "profile     : ${profile}"
           echo "rootfs size : ${size} MiB"
           echo "extra name  : ${extra}"
+          echo "lan ip      : ${lan_ip}"
           echo "rootfs fs   : ${ROOTFS_FS}"
           echo "release var.: ${RELEASE_VARIANT}   (only this variant is published)"
           echo "release tag : ${tag}"
@@ -251,6 +279,84 @@ jobs:
           echo "--- target profiles ---"
           ( cd "ib/${IB_DIR}" && make info 2>/dev/null | sed -n '1,30p' ) || true
 
+      - name: Fetch packages from our own repositories
+        id: custom
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH: ${{ steps.cfg.outputs.arch }}
+          IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
+        run: |
+          set -euo pipefail
+          conf="config/${ARCH}.conf"
+          # shellcheck source=/dev/null
+          . "$conf"
+
+          # 每个 target 要装哪些自建包，写在它自己的 conf 的 CUSTOM_ASSETS 里
+          # （格式见该文件注释）。没有这个变量就等于该目标不装自建包。
+          if [ -z "${CUSTOM_ASSETS:-}" ]; then
+            echo "config/${ARCH}.conf has no CUSTOM_ASSETS - nothing to fetch"
+            echo "custom_pkgs=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ImageBuilder 根目录的 packages/ 是官方留给本地包的位置：把 .apk 放进去，
+          # make image 会自动用 apk mkndx 建索引并装上（见 packages/README.md）。
+          # 脚本取各仓库的 latest Release，校验每个包的 ADB v3 格式与目标架构。
+          mkdir -p "ib/${IB_DIR}/packages"
+          python3 scripts/fetch-custom-packages.py \
+            --dest "ib/${IB_DIR}/packages" \
+            --out-env custom-packages.env
+
+          # shellcheck source=/dev/null
+          . ./custom-packages.env
+          echo "custom_pkgs=${CUSTOM_PKGS}" >> "$GITHUB_OUTPUT"
+          echo "--- 以下自建包会并入 PACKAGES ---"
+          echo "${CUSTOM_PKGS}"
+
+      - name: Prepare files overlay
+        id: files
+        shell: bash
+        env:
+          LAN_IP_IN: ${{ steps.cfg.outputs.lan_ip }}
+        run: |
+          set -euo pipefail
+
+          # files/ 是打进镜像的覆盖层（ImageBuilder 的 FILES=<dir>）：
+          # include/rootfs.mk 的 prepare_rootfs 会执行
+          #     $(call file_copy,$(2)/.,$(1))
+          # 把这个目录的内容整体拷进 rootfs，且紧随其后的 rm -rf 清单不碰
+          # /etc/uci-defaults —— 所以落在那里的脚本会留到设备首次启动才执行。
+          #
+          # 其中的 __LAN_IP__ 占位符在这里替换成 config/<arch>.conf 的 LAN_IP，
+          # 保持「出厂 LAN 地址」只有一处事实源。
+          dst="$GITHUB_WORKSPACE/ib/files"
+          rm -rf "$dst"
+          mkdir -p "$dst"
+          cp -a files/. "$dst/"
+
+          target="$dst/etc/uci-defaults/99-lan-ip"
+          if [ ! -f "$target" ]; then
+            echo "::error::files/etc/uci-defaults/99-lan-ip 不存在"
+            find "$dst" -type f -printf '%P\n' || true
+            exit 1
+          fi
+
+          sed -i "s|__LAN_IP__|${LAN_IP_IN}|g" "$target"
+          if grep -q '__LAN_IP__' "$target"; then
+            echo "::error::__LAN_IP__ 占位符没有被替换"
+            exit 1
+          fi
+          # uci-defaults 脚本由 /etc/init.d/boot 以 source 方式执行，不依赖执行位；
+          # 仍然补上 0755，免得将来换成直接执行时踩坑。
+          chmod 0755 "$target"
+
+          echo "--- 覆盖层内容 ---"
+          find "$dst" -type f -printf '%M  %P\n' | sort
+          echo "--- ${target} ---"
+          sed 's/^/    /' "$target"
+          echo "files_dir=$dst" >> "$GITHUB_OUTPUT"
+
       - name: Build image
         shell: bash
         working-directory: ib/${{ steps.cfg.outputs.ib_dir }}
@@ -258,20 +364,59 @@ jobs:
           PROFILE_IN: ${{ steps.cfg.outputs.profile }}
           SIZE_IN: ${{ steps.cfg.outputs.rootfs_size }}
           EXTRA_IN: ${{ steps.cfg.outputs.extra_image_name }}
-          PKGS: ${{ steps.cfg.outputs.packages }}
+          FILES_IN: ${{ steps.files.outputs.files_dir }}
+          PKGS: ${{ steps.cfg.outputs.packages }} ${{ steps.custom.outputs.custom_pkgs }}
         run: |
           set -euo pipefail
           echo "--- disk before ---"
           df -h . | tail -1
           echo "--- make image ---"
+          # ADD_LOCAL_KEY=1：把本次构建自动生成的本地签名公钥（keys/local-public-key.pem）
+          # 一并放进镜像的 /etc/apk/keys/，这样设备上以后 apk add 时能直接信任用
+          # 同一把私钥签名的本地索引，不必每次加 --allow-untrusted。
+          # （密钥由 image: 依赖的 _check_keys 自动生成，见官方 ImageBuilder Makefile。）
+          #
+          # FILES=<dir>：把该目录内容覆盖进 rootfs（出厂 LAN 地址就靠它）。
           make image \
             PROFILE="$PROFILE_IN" \
             PACKAGES="$PKGS" \
             ROOTFS_PARTSIZE="$SIZE_IN" \
             EXTRA_IMAGE_NAME="$EXTRA_IN" \
+            FILES="$FILES_IN" \
+            ADD_LOCAL_KEY=1 \
             -j"$(nproc)" 2>&1 | tee build.log
           echo "--- disk after ---"
           df -h . | tail -1
+
+      - name: Verify the LAN address is baked in
+        shell: bash
+        env:
+          IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
+          LAN_IP_IN: ${{ steps.cfg.outputs.lan_ip }}
+        run: |
+          set -euo pipefail
+
+          # make image 会把 FILES 覆盖层拷进它准备 rootfs 的暂存目录
+          # （include/rootfs.mk 的 prepare_rootfs 里就是一句 file_copy），
+          # 该目录构建后仍在原处。在这里查一遍，等于在打包前确认覆盖层真的落位 ——
+          # FILES 路径写错、占位符漏替换，都会在这步暴露，而不是等设备起来后发现
+          # 还是 192.168.1.1。
+          f="$(find "ib/${IB_DIR}" -type f -path '*/etc/uci-defaults/99-lan-ip' \
+                 -print -quit 2>/dev/null || true)"
+          if [ -z "$f" ]; then
+            echo "::error::镜像暂存 rootfs 里找不到 etc/uci-defaults/99-lan-ip —— FILES 覆盖层没有生效"
+            echo "--- ib/${IB_DIR} 下的 rootfs 暂存目录 ---"
+            find "ib/${IB_DIR}" -maxdepth 4 -type d -name 'root-*' -print 2>/dev/null || true
+            exit 1
+          fi
+          echo "found: ${f}"
+          echo "--- 内容 ---"
+          sed 's/^/    /' "$f"
+          if ! grep -q "network.lan.ipaddr='${LAN_IP_IN}'" "$f"; then
+            echo "::error::覆盖层里的 LAN 地址不是 ${LAN_IP_IN}"
+            exit 1
+          fi
+          echo "已确认：出厂 LAN 地址 ${LAN_IP_IN} 写进了镜像的 /etc/uci-defaults/99-lan-ip"
 
       - name: Collect release artifacts
         id: art
@@ -348,6 +493,39 @@ jobs:
           echo "--- release payload ---"
           ls -la
 
+      - name: Verify the custom packages are in the image
+        if: steps.custom.outputs.custom_pkgs != ''
+        shell: bash
+        env:
+          CUSTOM: ${{ steps.custom.outputs.custom_pkgs }}
+          MANIFEST: out/${{ steps.art.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::expected a manifest at ${MANIFEST}"
+            ls -la out
+            exit 1
+          fi
+
+          # 只有真正装进 rootfs 的包才会出现在 manifest 里，所以这是「自建包确实
+          # 拼进镜像」的实证，比只看构建日志靠谱：包没被索引、依赖解析失败、
+          # 架构不对，都会在这里暴露。
+          missing=0
+          for p in $CUSTOM; do
+            if grep -q "^${p} " "$MANIFEST"; then
+              grep "^${p} " "$MANIFEST" | sed 's/^/  in manifest: /'
+            else
+              echo "::error::${p} 不在镜像 manifest 里 —— 没有装进 rootfs"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "--- manifest 里与这些名字相近的行 ---"
+            for p in $CUSTOM; do grep -i -- "$p" "$MANIFEST" | head -n 3 || true; done
+            exit 1
+          fi
+          echo "全部 ${CUSTOM} 都已在镜像 manifest 中"
+
       - name: Upload build records
         if: always()
         uses: actions/upload-artifact@v4
@@ -377,6 +555,7 @@ jobs:
           VARIANT_DESC_OUT: ${{ steps.cfg.outputs.variant_desc }}
           FLASH_HINT_OUT: ${{ steps.cfg.outputs.flash_hint }}
           EXTRA_OUT: ${{ steps.cfg.outputs.extra_image_name }}
+          LAN_IP_OUT: ${{ steps.cfg.outputs.lan_ip }}
           MANIFEST: ${{ steps.art.outputs.manifest }}
           IMG: ${{ steps.art.outputs.img }}
           BYTES: ${{ steps.art.outputs.bytes }}
@@ -402,6 +581,7 @@ jobs:
             echo "| 根文件系统 | ${FS_OUT} |"
             echo "| rootfs 分区 | ${SIZE_OUT} MiB |"
             echo "| 镜像变体 | ${VARIANT_DESC_OUT} |"
+            echo "| 出厂 LAN 地址 | ${LAN_IP_OUT} |"
             echo "| 已安装软件包 | ${pkgcount} 个 |"
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"
@@ -409,6 +589,7 @@ jobs:
             echo
             echo "${FLASH_HINT_OUT}；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
             echo "rootfs 分区保持 ${SIZE_OUT} MiB 不变，可从任意同规格自制镜像增量升级并保留配置。"
+            echo "首次启动后 LAN 地址为 ${LAN_IP_OUT}（管理页 http://${LAN_IP_OUT}/）；该地址只在仍是出厂默认时才会被设置，用户改过的不动。"
           } > RELEASE_NOTES.md
 
           cat RELEASE_NOTES.md
