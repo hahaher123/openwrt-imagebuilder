@@ -538,21 +538,41 @@ jobs:
           # 只有真正装进 rootfs 的包才会出现在 manifest 里，所以这是「自建包确实
           # 拼进镜像」的实证，比只看构建日志靠谱：包没被索引、依赖解析失败、
           # 架构不对，都会在这里暴露。
+          #
+          # CUSTOM 里每项是 name=version（抓包脚本钉死了版本），manifest 是
+          # `name - version`（scripts/make-index-json.py 的 --manifest 输出）。
+          # 必须连版本一起断言：packages/ 只是 apk 的又一个仓库，同名包在官方
+          # feed 里也有、且版本号排序更高时，apk 会静默选 feed 那个 ——
+          # 只查名字的话这种情况完全看不出来（luci-app-natmap 就是这样被盖住的）。
           missing=0
           for p in $CUSTOM; do
-            if grep -q "^${p} " "$MANIFEST"; then
-              grep "^${p} " "$MANIFEST" | sed 's/^/  in manifest: /'
-            else
-              echo "::error::${p} 不在镜像 manifest 里 —— 没有装进 rootfs"
+            name="${p%%=*}"
+            want=""
+            case "$p" in
+              *=*) want="${p#*=}" ;;
+            esac
+
+            line="$(grep -m1 "^${name} " "$MANIFEST" || true)"
+            if [ -z "$line" ]; then
+              echo "::error::${name} 不在镜像 manifest 里 —— 没有装进 rootfs"
               missing=1
+              continue
             fi
+            if [ -n "$want" ] && [ "$line" != "${name} - ${want}" ]; then
+              echo "::error::${name} 装的是「${line}」，不是我们抓的 ${want}"
+              echo "::error::  多半是官方 feed 里有同名包且版本号排序更高，被它盖住了；"
+              echo "::error::  确认 CUSTOM_PKGS 里的 pin（name=version）真的传给了 make image"
+              missing=1
+              continue
+            fi
+            echo "  in manifest: ${line}"
           done
           if [ "$missing" -ne 0 ]; then
             echo "--- manifest 里与这些名字相近的行 ---"
-            for p in $CUSTOM; do grep -i -- "$p" "$MANIFEST" | head -n 3 || true; done
+            for p in $CUSTOM; do grep -i -- "${p%%=*}" "$MANIFEST" | head -n 3 || true; done
             exit 1
           fi
-          echo "全部 ${CUSTOM} 都已在镜像 manifest 中"
+          echo "全部 ${CUSTOM} 都已在镜像 manifest 中，且版本与抓到的完全一致"
 
       - name: Upload build records
         if: always()

@@ -127,10 +127,13 @@ sysupgrade -T <镜像>
 | `hahaher123/luci-app-natmap` | `luci-app-natmap`、`luci-i18n-natmap-zh-cn` | natmap 的 LuCI 界面 |
 | `sirpdboy/luci-app-ddns-go` | `ddns-go`、`luci-app-ddns-go`、`luci-i18n-ddns-go-zh-cn` | 第三方仓库，按架构提供 `SNAPSHOT-<架构>.tar.gz` |
 
-两点须知：
+三点须知：
 
 * 每个包都会按目标架构校验（必须标 `noarch` 或与该目标匹配），拿错架构会直接让构建失败；
   包名由脚本从包元数据里读出、自动并入 `PACKAGES`，无需在配置里重复列举。
+* 并入 `PACKAGES` 时**钉死版本**（`包名=版本`）：`packages/` 只是 apk 的又一个仓库，
+  同名包若在官方源里也有、且版本号排序更高，apk 会选官方那个。构建末段会拿 manifest
+  逐个核对「名字 + 版本」，被盖住会直接报错而不是静默装成别的版本。
 * 取的是各仓库的**最新 Release**，这些包的版本因此由上游决定、不由本仓库固定。其中
   `sirpdboy/luci-app-ddns-go` 是第三方来源，它的 `SNAPSHOT-*` 资产会随上游重建而变动。
 

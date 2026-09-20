@@ -28,8 +28,11 @@ apk 装机时正是用这个名字去 packages/ 里找文件，资产名多带�
 
     fetch-custom-packages.py --dest ib/<dir>/packages [--out-env FILE]
 
-`--out-env` 写出 `CUSTOM_PKGS="…"`（本次放进来的包名，去重排序），
-供 workflow 追加到 `PACKAGES=`。
+`--out-env` 写出 `CUSTOM_PKGS="…"`，每项是 `name=version`（去重排序），
+供 workflow 追加到 `PACKAGES=`。**必须带版本号**：packages/ 只是 apk 的又一个仓库，
+同名包若在官方 feed 里也有、且版本号排序更高，apk 会选 feed 那个
+（实测 luci-app-natmap：feed 的 `26.259.x` 盖过本仓的 `1.5.10-r3`）。
+IB 的 FormatPackages 原生支持 `pkg=version`，钉住才装得上我们抓的那份。
 """
 
 import argparse
@@ -296,7 +299,12 @@ def main(argv=None):
                 with open(path, "wb") as fh:
                     fh.write(data)
                 written[canon] = where
-                pkgnames.append(meta["name"])
+                # 钉死版本（`name=version`）：虽然 packages/ 是 apk 的一个额外仓库，
+                # 但同名包只要是官方 feed 里也有、且版本号排序更高，apk 就会选 feed 那个
+                # （实测 luci-app-natmap：feed 的 26.259.x 盖过本仓的 1.5.10-r3）。
+                # ImageBuilder 的 FormatPackages 原生支持 `pkg=version` 写法
+                # （见 target/imagebuilder/files/Makefile），钉住才能保证装的是我们抓的这份。
+                pkgnames.append("%s=%s" % (meta["name"], meta["version"]))
                 note = "" if canon == fname else "  ← 资产原名 %s" % fname
                 print("      ✓ %-46s %8d B  name=%s version=%s arch=%s%s"
                       % (canon, len(data), meta["name"], meta["version"], meta["arch"], note))
@@ -308,7 +316,7 @@ def main(argv=None):
     for fname in sorted(written):
         print("   %-46s <- %s" % (fname, written[fname]))
 
-    # 去重排序后写出去（同名包理论上不该出现，真出现前面的检查已经报错）
+    # 去重排序后写出去：每项是 `name=version`，钉死到我们抓到的版本
     custom = sorted(set(pkgnames))
     if args.out_env:
         with open(args.out_env, "w", encoding="utf-8") as fh:
