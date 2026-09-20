@@ -2,7 +2,11 @@ name: Build OpenWrt image
 
 # 触发方式
 #   1) workflow_dispatch —— 手动指定版本号 + 架构；两项留空即取 config/build.conf
-#   2) push 到 main 且改动 config/** 或本文件 —— 直接用 config/build.conf 构建
+#   2) push 到 main 且改动 config/**、files/**、scripts/** 或本文件 —— 直接用
+#      config/build.conf 构建
+#
+# scripts/ 在触发范围内：fetch-custom-packages.py 决定自建包能不能正确落进
+# packages/，它一改就必须重建（漏了它会出现「改了脚本但没人重编」的静默空窗）。
 #
 # 默认构建目标（版本号 + 架构）在整个仓库里只有一处定义：config/build.conf。
 # 改那一个文件的两行，push 后就会重编并覆盖 Release；本文件无需再动。
@@ -55,6 +59,7 @@ on:
     paths:
       - "config/**"
       - "files/**"
+      - "scripts/**"
       - ".github/workflows/build-image.yml"
 
 permissions:
