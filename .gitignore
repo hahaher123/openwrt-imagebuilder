@@ -7,6 +7,9 @@ out/
 ib/
 imagebuilder/
 
+# 抓自建包时由 workflow 在仓库根目录产出的中间文件
+custom-packages.env
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db
