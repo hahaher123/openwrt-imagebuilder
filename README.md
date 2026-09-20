@@ -110,7 +110,29 @@ sysupgrade -T <镜像>
 | x86_64 | 网卡驱动一排：`kmod-e1000`、`kmod-e1000e`、`kmod-igb`、`kmod-igc`、`kmod-ixgbe`、`kmod-ixgbevf`、`kmod-r8169`、`kmod-tg3`、`kmod-forcedeth`、`kmod-bnx2`、`kmod-amd-xgbe`、`kmod-dwmac-intel`、`kmod-amazon-ena`；`kmod-drm-i915`；`grub2-bios-setup`；`kmod-button-hotplug` |
 | r2s | `kmod-usb-net-rtl8152`（R2S 的第二个千兆口挂在 USB 3.0 上，缺它就只剩一个网口）；`uboot-envtools`；`kmod-gpio-button-hotplug` |
 
-完整清单以 `config/<配置>.conf` 的 `PACKAGES` 为准，或系统启动后执行 `apk list --installed` 查看。
+完整清单以 `config/<配置>.conf` 的 `PACKAGES` 与 `CUSTOM_ASSETS` 为准，或系统启动后执行
+`apk list --installed` 查看。
+
+### 自建包与第三方包
+
+上面两类都是官方源里的包。此外还有一批**不在官方源里**的包，构建时从各自仓库的
+**最新 Release** 抓取后一并装入（来源与匹配规则见 `config/<配置>.conf` 的 `CUSTOM_ASSETS`，
+抓取与格式校验由 `scripts/fetch-custom-packages.py` 完成）：
+
+| 来源仓库 | 装入的包 | 说明 |
+| --- | --- | --- |
+| `hahaher123/openwrt-mihomo` | `mihomo`、`luci-app-mihomo` | mihomo 内核与 LuCI 界面 |
+| `hahaher123/openwrt-oxidns` | `oxidns` | oxidns 主程序 |
+| `hahaher123/luci-app-oxidns` | `luci-app-oxidns`、`luci-i18n-oxidns-zh-cn` | oxidns 的 LuCI 界面（含规则文件编辑） |
+| `hahaher123/luci-app-natmap` | `luci-app-natmap`、`luci-i18n-natmap-zh-cn` | natmap 的 LuCI 界面 |
+| `sirpdboy/luci-app-ddns-go` | `ddns-go`、`luci-app-ddns-go`、`luci-i18n-ddns-go-zh-cn` | 第三方仓库，按架构提供 `SNAPSHOT-<架构>.tar.gz` |
+
+两点须知：
+
+* 每个包都会按目标架构校验（必须标 `noarch` 或与该目标匹配），拿错架构会直接让构建失败；
+  包名由脚本从包元数据里读出、自动并入 `PACKAGES`，无需在配置里重复列举。
+* 取的是各仓库的**最新 Release**，这些包的版本因此由上游决定、不由本仓库固定。其中
+  `sirpdboy/luci-app-ddns-go` 是第三方来源，它的 `SNAPSHOT-*` 资产会随上游重建而变动。
 
 ## 重新构建
 
@@ -126,6 +148,8 @@ ARCH="x86_64"
   将来新增目标就照现有文件复制一份改内容）。
 * **换包集 / rootfs 分区大小 / 出厂 LAN 地址** → 改 `config/<配置>.conf` 里对应的一行
   （`PACKAGES` / `ROOTFS_SIZE` / `LAN_IP`）。
+* **换自建包来源** → 改 `config/<配置>.conf` 的 `CUSTOM_ASSETS` 一行或几行，格式为
+  `owner/repo|资产名 glob`；整块留空或删掉，该目标就不再从外部仓库取包。
 
 改完 push 到 `main` 即自动重建，并把镜像发到 Release `v<版本>-<配置>`；同名 Release 只替换
 资产与说明，不新建。
