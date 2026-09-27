@@ -1,0 +1,58 @@
+#!/bin/sh
+# 由 openwrt-imagebuilder 的 FILES 覆盖层带进镜像，设备首次启动时执行一次
+# （执行方式与书写注意事项见同目录的 99-lan-ip）。
+#
+# 作用：让 nginx 直接在 80 端口提供 LuCI 页面，而不是把 HTTP 请求 302 跳到 HTTPS。
+#
+# 背景 —— 「80 只跳转」并不是某个布尔开关，而是官方默认 UCI 里的一个 server 段：
+#     config server '_lan'           list listen '443 ssl default_server' …  ← 真正服务 LuCI
+#     config server '_redirect2ssl'  list listen '80'  option return '302 …'  ← 只负责跳转
+# 默认值见 packages/net/nginx-util/files/nginx.config。
+#
+# nginx 启动时由 /usr/bin/nginx-util init_lan → init_uci 把 UCI 逐段渲染成
+# /var/lib/nginx/uci.conf 里的 server {} 块：选项名原样输出成指令，带 'uci_' 前缀的
+# 作为工具元数据跳过。所以改这两个段就等于改 nginx 的行为，既不用碰模板，也不受
+# init_lan 影响 —— init_lan 只生成给 conf.d 用的 listen 片段文件，从不回写 UCI。
+#
+# 改法：删掉 _redirect2ssl，并给 _lan 补上 80 的 listen。此后 80 上只剩 _lan 一个
+# server，它自动成为该端口的默认 server，于是 http://<设备地址>/ 直接进 LuCI。
+# 443 保持原样可用（同一个 server 块），且 _lan 的 restrict_locally 会一并作用于 80，
+# 访问范围仍限定在私有网段。
+#
+# 只在「仍是出厂状态」时才改，判据是两个段都还在。原因同 99-lan-ip：sysupgrade 保留
+# 配置升级会留下 /etc/config/*，但 /etc/uci-defaults/ 不在保留清单里、会被新镜像重放
+# 一次；不加判断的话，用户自己调过的 nginx 配置会被冲回出厂值。
+#
+# 排序：文件名以 59 开头，必须排在 60_nginx-luci-support 之前 —— 后者负责启动 nginx，
+# 排在它前面才能保证 nginx 第一次启动用的就是改好后的配置。
+
+if [ "$(uci -q get nginx._redirect2ssl)" = "server" ] &&
+	[ "$(uci -q get nginx._lan)" = "server" ]; then
+
+	# 已经有 80 监听就不重复添加（幂等）。
+	# 原厂 _lan.listen 只有 443 两项，走不到这个分支；这里是防御用户手动加过的情况。
+	case "$(uci -q get nginx._lan.listen)" in
+		*'80'*)
+			;;
+		*)
+			uci -q add_list nginx._lan.listen='80'
+			uci -q add_list nginx._lan.listen='[::]:80'
+			;;
+	esac
+
+	uci -q delete nginx._redirect2ssl
+
+	# 显式提交：60_nginx-luci-support 在本脚本之后紧接着启动 nginx，
+	# 而 boot 的统一 `uci commit` 要等所有 uci-defaults 跑完才执行。
+	uci -q commit nginx
+
+	# 兜底：万一执行顺序被打乱（nginx 已在运行），让它重新加载配置。
+	if [ -n "$(pgrep nginx)" ]; then
+		/etc/init.d/nginx reload >/dev/null 2>&1
+	fi
+fi
+
+# 末尾必须落在必定成功的语句上：boot 靠 `( . file ) && applied=...` 决定是否删除本脚本，
+# 而 if 语句的返回码取「最后一个执行的分支语句」——上面的 reload 一旦失败就会把它带成非 0，
+# 脚本便不会被删除、每次启动都重跑一次。故显式收口。
+true

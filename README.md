@@ -34,7 +34,7 @@ rockchip 用 u-boot，出 `sysupgrade` 整盘镜像。**rockchip 没有 combined
 够用的可写分区。
 
 出厂 LAN 地址**首次启动时**生效，把 OpenWrt 默认的 `192.168.1.1` 换成上表地址，所以刷完开机后
-管理页在 `http://192.168.100.1/`（x86_64 会跳到 `https://`，见「Web 服务」）。它只在该地址仍是出厂
+管理页在 `http://192.168.100.1/`。它只在该地址仍是出厂
 默认值时才动手：自己改过 LAN 地址的设备，升级后不会被冲回默认值。
 
 ## 用法
@@ -112,17 +112,17 @@ sysupgrade -T <镜像>
 
 OpenWrt 默认用 uhttpd，本仓库的 **x86_64 目标改用 nginx**，r2s 保持默认。
 
-**访问方式随之变化（仅 x86_64）**：80 端口只把请求 `302` 跳到 HTTPS，LuCI 实际在 443，证书是
-**首次启动时自动生成的自签名证书**。所以刷完访问 `https://192.168.100.1/`（输入 `http://` 会被
-跳过去），浏览器会提示证书不受信任 —— 自签证书的正常现象，确认继续即可。访问范围限定在私有网段
+**访问方式（仅 x86_64）**：`http://192.168.100.1/` 直接打开 LuCI；`https://` 同样可用（证书是
+首次启动自动生成的自签名证书，浏览器会提示不受信任，确认继续即可）。两种方式都限定在私有网段
 （`192.168.0.0/16`、`10.0.0.0/8`、`172.16.0.0/12` 等），公网访问不到。
 
-想改回「纯 HTTP、不跳转、不弹证书警告」，在设备上执行：
+80 端口**直接提供 LuCI**，而不是跳转到 HTTPS —— 这一点与 OpenWrt 官方 nginx 默认行为相反，
+由镜像里的 `files/etc/uci-defaults/59-nginx-http` 在首次启动时改掉。想只保留 HTTPS，删掉 80 的两条
+监听即可：
 
 ```sh
-uci add_list nginx._lan.listen='80'
-uci add_list nginx._lan.listen='[::]:80'
-uci delete nginx._redirect2ssl
+uci del_list nginx._lan.listen='80'
+uci del_list nginx._lan.listen='[::]:80'
 uci commit nginx
 /etc/init.d/nginx restart
 ```
