@@ -82,7 +82,7 @@ sysupgrade -T <镜像>
 
 在官方对应 profile 的默认包集之上追加。
 
-* **LuCI**：`luci`（x86_64 换成 `luci-nginx` + `nginx-ssl`，见「Web 服务」）、
+* **LuCI**：`luci-nginx` + `nginx-ssl`（两个目标都用 nginx，见「Web 服务」）、
   `luci-app-attendedsysupgrade`、`luci-proto-wireguard`
 * **简体中文界面**：`luci-i18n-base-zh-cn`、`luci-i18n-firewall-zh-cn`、
   `luci-i18n-package-manager-zh-cn`、`luci-i18n-ttyd-zh-cn`、`luci-i18n-sqm-zh-cn`、
@@ -110,10 +110,10 @@ sysupgrade -T <镜像>
 
 ### Web 服务：nginx 还是 uhttpd
 
-OpenWrt 默认用 uhttpd，本仓库的 **x86_64 目标改用 nginx**，r2s 保持默认。
+OpenWrt 默认用 uhttpd，本仓库的**两个目标都改用 nginx**。
 
-**访问方式（仅 x86_64）**：`http://192.168.100.1/` 直接打开 LuCI；`https://` 同样可用（证书是
-首次启动自动生成的自签名证书，浏览器会提示不受信任，确认继续即可）。两种方式都限定在私有网段
+**访问方式**：`http://192.168.100.1/` 直接打开 LuCI；`https://` 同样可用（证书是首次启动自动
+生成的自签名证书，浏览器会提示不受信任，确认继续即可）。两种方式都限定在私有网段
 （`192.168.0.0/16`、`10.0.0.0/8`、`172.16.0.0/12` 等），公网访问不到。
 
 80 端口**直接提供 LuCI**，而不是跳转到 HTTPS —— 这一点与 OpenWrt 官方 nginx 默认行为相反，
