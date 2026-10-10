@@ -89,6 +89,17 @@ sysupgrade -T <镜像>
   `luci-i18n-unbound-zh-cn`、`luci-i18n-irqbalance-zh-cn`
 * **网络与代理**：`nftables`、`kmod-nft-tproxy`、`kmod-nft-offload`、`natmap`、`ethtool`
 * **其他**：`dnsmasq-full`（替代默认的 `dnsmasq`）、`kmod-fs-vfat`（挂 U 盘）
+* **拥塞控制**：`kmod-tcp-bbr`（BBR）。⚠️ 装在镜像里只是让 bbr **可选**（内核里它是模块），
+  默认仍是 `cubic`。要启用，在设备上把这行写进 `/etc/sysctl.conf` 后执行 `sysctl -p`：
+
+  ```
+  net.ipv4.tcp_congestion_control=bbr
+  ```
+
+  用 `/etc/sysctl.conf` 而不是 `/etc/sysctl.d/*.conf`：后者不在 sysupgrade 的保留列表里，
+  重刷后就没了（官方在该文件顶部有明确注释）。另外 `net.core.default_qdisc` 保持默认的
+  `fq_codel` 即可 —— 这是转发设备，BBR 只作用于设备自身发起的连接，改 `default_qdisc`
+  反而会连带动到所有接口的队列行为。
 * **仅 x86_64**：网卡驱动一排 —— `kmod-e1000`、`kmod-e1000e`、`kmod-igb`、`kmod-igc`、`kmod-ixgbe`、
   `kmod-ixgbevf`、`kmod-r8169`、`kmod-tg3`、`kmod-forcedeth`、`kmod-bnx2`、`kmod-amd-xgbe`、
   `kmod-dwmac-intel`、`kmod-amazon-ena`；`kmod-drm-i915`；`grub2-bios-setup`；`kmod-button-hotplug`
