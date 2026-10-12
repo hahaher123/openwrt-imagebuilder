@@ -1,0 +1,57 @@
+#!/bin/sh /etc/rc.common
+# R2S 启动期调优 —— 只对 friendlyarm,nanopi-r2s* 生效。
+#
+# START=95：排在 network(20)/usb 等之后，确保网卡与 USB 设备都已就绪。
+#
+# 这里只做两件「必须在用户态定时设定」的事：
+#   1) 网卡/中断/offload 调优 —— 逻辑都在 hotplug 脚本里，启动时主动调一次。
+#      为什么要主动调：网卡在 boot 早期就枚举完成了，而 /etc/hotplug.d/ 要等
+#      rootfs 挂载后才生效，那一次事件必然被错过。
+#   2) CPU 调频：governor 与 min/max 是运行期 sysfs，重启即回默认值。
+#
+# USB autosuspend 的关闭也放在这里（另有 hotplug 侧兜底）。
+
+START=95
+
+is_r2s() {
+	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+		friendlyarm,nanopi-r2s*) return 0 ;;
+	esac
+	return 1
+}
+
+setup_cpufreq() {
+	# 参考 immortalwrt 对 rk3328 的配置：governor=schedutil、min=816MHz、max=1512MHz。
+	# ⚠️ 但官方 dtb 的 opp 表最高只到 **1296MHz**（1392/1512 那两档是 immortalwrt
+	# 自己打 dts 补丁加的，见 target/linux/rockchip/patches-6.18/991-*.patch）。
+	# 所以这里**探测**可用档位、取不超过 1512 的最高值：
+	#   现在 → 1296000；将来若换成带该 opp 的内核，会自动用上 1512000。
+	local P=/sys/devices/system/cpu/cpufreq/policy0
+	local want=1512000 f max=""
+
+	[ -d "$P" ] || return 0
+
+	for f in $(cat "$P/scaling_available_frequencies" 2>/dev/null); do
+		[ "$f" -le "$want" ] && max="$f"
+	done
+	[ -n "$max" ] || max="$(cat "$P/cpuinfo_max_freq" 2>/dev/null)"
+	[ -n "$max" ] || return 0
+
+	echo schedutil > "$P/scaling_governor" 2>/dev/null
+	echo 816000 > "$P/scaling_min_freq" 2>/dev/null
+	echo "$max" > "$P/scaling_max_freq" 2>/dev/null
+
+	logger -t r2s-tuning "cpufreq governor=schedutil min=816000 max=${max}" 2>/dev/null
+	logger -t r2s-tuning "cpufreq current=$(cat "$P/scaling_cur_freq" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+	is_r2s || return 0
+
+	# 网卡中断绑核 / irqbalance banirq / 关 USB 口 offload / 关 USB autosuspend
+	# 全在 hotplug 脚本里（一份逻辑两处触发）。
+	[ -x /etc/hotplug.d/net/40-r2s-net-tuning ] && \
+		ACTION=add /etc/hotplug.d/net/40-r2s-net-tuning
+
+	setup_cpufreq
+}

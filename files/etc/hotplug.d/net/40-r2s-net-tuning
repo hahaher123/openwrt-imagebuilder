@@ -1,0 +1,106 @@
+#!/bin/sh
+# R2S 网卡中断/队列调优 —— 只对 friendlyarm,nanopi-r2s* 生效。
+#
+# 由两处触发（同一份逻辑，不重复）：
+#   1) 内核 net uevent：网卡出现时（ACTION=add）；
+#   2) /etc/init.d/r2s-tuning 启动时主动调一次 —— 网卡在 boot 早期就枚举了，而
+#      /etc/hotplug.d/ 要等 rootfs 挂载后才生效，hotplug 很可能**错过**那一次。
+#
+# 本脚本不依赖 $DEVICE：每次都把两个口处理一遍（幂等，开销可忽略），
+# 这样从 init 里调用时不需要伪造环境变量。
+#
+# 做三件事：
+#   * 绑核：原生网卡(eth0) 中断 → CPU1（mask 0x2）；USB 网卡 → CPU2（mask 0x4）。
+#     ⚠️ R2S 上 USB 网口是 **eth1**（RTL8153B），它的中断在 /proc/interrupts 里是
+#     **xhci 控制器**那一行（`xhci-hcd:usb1`），不叫 eth1 —— 所以匹配串要单独给。
+#     做法照搬 immortalwrt 的 rockchip/armv8 40-net-smp-affinity。
+#   * irqbalance：把这两个中断号加进 banirq —— 它是持续进程（默认每 10s 重平衡），
+#     不 ban 掉的话会立刻把上面的绑核覆盖回去。
+#   * 关 USB 网口的 offload：RTL8153(r8152) 在高负载下 gro/gso/tso 容易触发发送
+#     超时与重传异常，关掉更稳（只关 USB 口，原生口不动）。
+#
+# 掩码是 16 进制 smp_affinity：CPU0→1、CPU1→2、CPU2→4。
+
+[ "$ACTION" = "add" ] || exit 0
+
+. /lib/functions.sh
+
+case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+	friendlyarm,nanopi-r2s*) ;;
+	*) exit 0 ;;
+esac
+
+# ── 工具函数 ───────────────────────────────────────────────────────────
+# 在 /proc/interrupts 里找中断号；设备可能还没就绪，最多等 10 秒
+# ⚠️ 行首是带前导空格的序号（" 30: ..."），必须把空白去掉 —— 否则拼出来的
+#    路径 "/proc/irq/ 30/smp_affinity" 带空格，写不进去且会被 2>/dev/null 吞掉。
+get_irq() {
+	local pat="$1" line sec=0
+
+	while [ "$sec" -le 10 ]; do
+		line="$(grep -E -m1 "${pat}\$" /proc/interrupts 2>/dev/null)" && break
+		sec=$((sec + 2))
+		sleep 2
+	done
+
+	printf '%s' "$line" | sed 's/:.*//' | tr -d '[:space:]'
+}
+
+# 把中断号加进 irqbalance 的 banirq（幂等；真变了才 reload）
+add_banirq() {
+	local irq="$1"
+
+	[ -n "$irq" ] || return 0
+	uci -q get irqbalance.irqbalance.banirq | tr ' ' '\n' | grep -qx "$irq" && return 0
+
+	uci -q add_list irqbalance.irqbalance.banirq="$irq"
+	uci -q commit irqbalance
+	/etc/init.d/irqbalance reload >/dev/null 2>&1
+}
+
+# 绑核 + 排除出 irqbalance
+#   $1 = affinity 掩码（hex）  $2 = 接口名（仅用于日志）  $3 = /proc/interrupts 匹配串
+set_interface_core() {
+	local mask="$1" iface="$2" pat="${3:-$2}" irq
+
+	irq="$(get_irq "$pat")"
+	if [ -z "$irq" ]; then
+		logger -t r2s-tuning "no irq matched '${pat}' (${iface})" 2>/dev/null
+		return 0
+	fi
+
+	printf '%s' "$mask" > "/proc/irq/${irq}/smp_affinity" 2>/dev/null
+	logger -t r2s-tuning "irq ${irq} (${iface}) affinity -> 0x${mask}" 2>/dev/null
+	add_banirq "$irq"
+}
+
+# 关 USB 网口的 offload（不支持的特性静默跳过）
+disable_offload() {
+	local ifc="$1" k
+
+	[ -d "/sys/class/net/${ifc}" ] || return 0
+	for k in gro gso tso rxvlan txvlan; do
+		ethtool -K "$ifc" "$k" off >/dev/null 2>&1
+	done
+	logger -t r2s-tuning "offload disabled on ${ifc}" 2>/dev/null
+}
+
+# USB 设备不做 autosuspend（RTL8153 空闲后被挂起会掉线/复位）
+disable_usb_autosuspend() {
+	local f
+
+	for f in /sys/bus/usb/devices/*/power/control; do
+		[ -w "$f" ] || continue
+		echo on > "$f" 2>/dev/null
+	done
+}
+
+# ── 主逻辑 ─────────────────────────────────────────────────────────────
+disable_usb_autosuspend
+
+set_interface_core 2 "eth0"
+set_interface_core 4 "eth1" "xhci-hcd:usb[0-9]+"
+
+disable_offload "eth1"
+
+exit 0

@@ -119,6 +119,21 @@ sysupgrade -T <镜像>
 取的都是各仓库的**最新 Release**，所以这些包的版本由上游决定、不由本仓库固定。完整清单以设备上
 执行 `apk list --installed` 为准。
 
+### R2S 专属：接口定向与系统调优
+
+只对 `friendlyarm,nanopi-r2s*` 生效（覆盖层是所有目标共用的，脚本里按板名判断）。
+
+* **接口定向**：原生网口 `eth0` 作 **LAN**、USB 网口 `eth1` 作 **WAN**
+  （官方默认正好相反：LAN=eth1/USB）。原生口接交换机/AP 要的是稳，USB 口跑上行单流够用。
+* **CPU 调频**：`schedutil` + 最低 `816MHz` + 最高取**可用档位中的最高值**。
+  官方内核的 opp 表最高只到 `1296MHz`；若换成带 `1512MHz` 档的内核
+  （如 immortalwrt，它自己打了 dts 补丁），脚本会自动用满，无需改动。
+* **中断绑核**：原生网卡中断 → CPU1、USB 网卡（xhci 控制器）中断 → CPU2，
+  并把两个中断加入 irqbalance 的 `banirq` —— 它是常驻进程（默认每 10s 重平衡），
+  不排除掉会把绑定覆盖回去。irqbalance 本身保持启用，只是 `interval` 放宽到 30s、避开 CPU0。
+* **USB 网卡稳定性**：禁止 USB autosuspend；关闭 USB 网口（`eth1`）的
+  `gro/gso/tso/rxvlan/txvlan` —— RTL8153 在高负载下开着这些 offload 容易触发发送超时与重传异常。
+
 ### Web 服务：nginx 还是 uhttpd
 
 OpenWrt 默认用 uhttpd，本仓库的**两个目标都改用 nginx**。

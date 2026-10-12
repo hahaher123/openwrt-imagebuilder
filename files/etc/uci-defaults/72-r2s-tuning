@@ -1,0 +1,44 @@
+#!/bin/sh
+# R2S 出厂定向与调优 —— 仅 friendlyarm,nanopi-r2s* 生效。
+# 覆盖层 files/ 是所有目标共用的，所以必须按板名判断，不能无条件执行。
+#
+# 命名 72- 的用意：必须**晚于** board.d 生成的默认网络配置。OpenWrt 把
+# target 的 /etc/board.d/* 链接进 /etc/uci-defaults/ 执行，其中 02_network
+# 生成 network 配置；uci-defaults 按文件名字典序跑，72 > 02 ✓
+
+is_r2s() {
+	grep -q 'friendlyarm,nanopi-r2s' /tmp/sysinfo/board_name 2>/dev/null && return 0
+	# uci-defaults 阶段 /tmp/sysinfo 可能还没写好，退回设备树
+	tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null |
+		grep -qx 'friendlyarm,nanopi-r2s'
+}
+
+is_r2s || exit 0
+
+# ── 1. 接口定向：原生网口当 LAN、USB 网口当 WAN ─────────────────────────
+# 官方 02_network 写的是 `ucidef_set_interfaces_lan_wan 'eth1' 'eth0'`，
+# 即 LAN=eth1(USB RTL8153B) / WAN=eth0(原生 RTL8211E) —— 与本机偏好**正好相反**。
+# R2S 上：eth0 = 原生 rk_gmac-dwmac；eth1 = USB3 的 RTL8153B。
+# 原生口做 LAN（接交换机/AP 要的是稳），USB 口做 WAN（上行单流，千兆够用）。
+if uci -q get network.lan >/dev/null; then
+	uci -q set network.lan.device='eth0'
+fi
+if uci -q get network.wan >/dev/null; then
+	uci -q set network.wan.device='eth1'
+fi
+uci -q commit network
+
+# ── 2. irqbalance 基础调优 ─────────────────────────────────────────────
+# 网卡中断由 /etc/hotplug.d/net/40-r2s-net-tuning 绑核并写进 banirq，这里只管全局参数。
+uci -q set irqbalance.irqbalance='irqbalance'
+uci -q set irqbalance.irqbalance.enabled='1'
+uci -q set irqbalance.irqbalance.deepestcache='2'    # 按 L2 分域（默认值，写显便于核对）
+uci -q set irqbalance.irqbalance.interval='30'       # 10s→30s，减少中断搬迁的 cache 抖动
+uci -q set irqbalance.irqbalance.banned_cpulist='0'  # CPU0 留给定时器与系统中断
+uci -q commit irqbalance
+/etc/init.d/irqbalance enable
+
+# ── 3. 启用启动期调优脚本（USB autosuspend + CPU 调频 + 主动调一次网卡）──
+/etc/init.d/r2s-tuning enable
+
+exit 0
