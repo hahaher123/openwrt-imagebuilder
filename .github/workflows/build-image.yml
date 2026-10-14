@@ -769,13 +769,21 @@ jobs:
             echo "| 已安装软件包 | ${pkgcount} 个 |"
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"
-            echo "| sha256 | ${SHA} |"
+            echo "| sha256 | \`${SHA}\`（详见下方同名 .sha256 文件） |"
             echo "| 构建提交 | ${commit_short} |"
             echo "| 构建记录 | ${run_url} |"
             echo
             echo "${FLASH_HINT_OUT}；已是 OpenWrt 系统时用 \`sysupgrade\` 刷入。"
             echo "rootfs 分区保持 ${SIZE_OUT} MiB 不变，可从任意同规格自制镜像增量升级并保留配置。"
             echo "首次启动后 LAN 地址为 ${LAN_IP_OUT}（管理页 http://${LAN_IP_OUT}/）；该地址只在仍是出厂默认时才会被设置，用户改过的不动。"
+            echo
+            echo "**校验镜像**：下载本 Release 的 \`${IMG}\` 与同名 \`${IMG}.sha256\`，然后"
+            echo ""
+            echo '```'
+            echo "sha256sum -c ${IMG}.sha256"
+            echo '```'
+            echo ""
+            echo "应输出 \`${IMG}: OK\`。"
           } > RELEASE_NOTES.md
 
           cat RELEASE_NOTES.md
@@ -783,12 +791,14 @@ jobs:
 
           title="OpenWrt ${VER} ${ARCH} (${FS_OUT} ${SIZE_OUT} MiB, ${VARIANT_OUT})"
 
+          # .sha256 必须与 .img.gz 同资产包发出（Upload build records 那份只保留
+          # 14 天，不适合做长期校验来源）；--clobber 让同 tag 重发时也能替换更新。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release ${TAG} already exists - replacing its asset"
-            gh release upload "$TAG" "out/${IMG}" --clobber
+            echo "release ${TAG} already exists - replacing its assets"
+            gh release upload "$TAG" "out/${IMG}" "out/${IMG}.sha256" --clobber
             gh release edit "$TAG" --title "$title" --notes-file RELEASE_NOTES.md
           else
-            gh release create "$TAG" "out/${IMG}" \
+            gh release create "$TAG" "out/${IMG}" "out/${IMG}.sha256" \
               --title "$title" \
               --notes-file RELEASE_NOTES.md
           fi
