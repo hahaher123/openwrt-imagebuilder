@@ -499,18 +499,22 @@ jobs:
           # 仍然补上 0755，免得将来换成直接执行时踩坑。
           chmod 0755 "$target"
 
-          # 两道静态守卫：语法错、或误用 exit/return（被 source 时会牵连调用方
-          # 子 shell，且末尾返回非 0 会让脚本留在原地反复重跑）都会在设备上才暴露，
-          # 所以在这里就拦住。**对所有 uci-defaults 脚本都查**（覆盖层是各目标共用的，
-          # 新增脚本自动受保护，不必每次回来加一行）。
+          # 静态守卫（对**所有** uci-defaults 脚本；覆盖层各目标共用 ⇒ 新增脚本自动受保护）：
+          #   1) 语法必须过 —— 语法错要到设备上才暴露，太晚；
+          #   2) 不许 `exit <非 0>` —— boot 用 `( . file ) && applied=...` 判断脚本是否
+          #      "跑成功"，非 0 会让脚本留在原地、每次启动重跑。
+          #   ⚠️ **`exit 0` 是合法的判板早退写法，不要一并禁掉**：boot 在**子 shell** 里
+          #      source（`/etc/init.d/boot` 的 uci_apply_defaults，实物核实于 25.12.5
+          #      rootfs），exit 只退出那个子 shell、不牵连调用方，且返回 0 会被正常记为
+          #      applied。`72-r2s-tuning` 就靠 `is_r2s || exit 0` 做非 R2S 早退。
           for f in "$dst"/etc/uci-defaults/*; do
             [ -f "$f" ] || continue
             if ! sh -n "$f"; then
               echo "::error::$(basename "$f") 语法错误"
               exit 1
             fi
-            if grep -nE '^[[:space:]]*(exit|return)([[:space:]]|$)' "$f"; then
-              echo "::error::$(basename "$f") 不能使用 exit / return（它会被 source 执行）"
+            if grep -nE '^[[:space:]]*exit[[:space:]]+[1-9]' "$f"; then
+              echo "::error::$(basename "$f") 里有 exit <非 0>：脚本不会被删除，每次启动都会重跑"
               exit 1
             fi
           done
