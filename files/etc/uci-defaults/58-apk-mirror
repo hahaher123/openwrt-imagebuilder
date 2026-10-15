@@ -10,7 +10,10 @@
 # 生效时机：首次启动（以及整盘 sysupgrade 之后会被重放 —— 该文件不是 conffile，
 #          新镜像的 base-files 会把它恢复成官方源，正好由本脚本再改回 NJU）。
 
-MIRROR="https://mirrors.nju.edu.cn/openwrt"
+# 域名与现场设备保持一致（甄别过程见 topics/openwrt-apk-mirror.md）：单数
+# mirror.nju.edu.cn。复数 mirrors.nju.edu.cn 也通且内容逐字节相同，
+# 但**只用其中一个**，别在两处用不同写法。
+MIRROR="https://mirror.nju.edu.cn/openwrt"
 FEED=/etc/apk/repositories.d/distfeeds.list
 
 if [ -f "$FEED" ] && grep -q 'downloads\.openwrt\.org' "$FEED"; then

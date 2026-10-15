@@ -597,11 +597,11 @@ jobs:
             echo "::error::镜像暂存 rootfs 里找不到 etc/uci-defaults/58-apk-mirror —— FILES 覆盖层没生效"
             exit 1
           fi
-          if ! grep -q 'mirrors\.nju\.edu\.cn/openwrt' "$m"; then
+          if ! grep -q 'mirror\.nju\.edu\.cn/openwrt' "$m"; then
             echo "::error::58-apk-mirror 里没有 NJU 地址"
             exit 1
           fi
-          echo "已确认：apk 换源脚本在镜像里，指向 mirrors.nju.edu.cn/openwrt"
+          echo "已确认：apk 换源脚本在镜像里，指向 mirror.nju.edu.cn/openwrt"
 
       - name: Collect release artifacts
         id: art

@@ -156,7 +156,7 @@ uci commit nginx
 
 ## 软件源
 
-镜像出厂时 `apk` 的更新源已换成**南京大学镜像**（`https://mirrors.nju.edu.cn/openwrt`），
+镜像出厂时 `apk` 的更新源已换成**南京大学镜像**（`https://mirror.nju.edu.cn/openwrt`），
 不再指向官方 `downloads.openwrt.org`。换源在**首次启动**时完成（`/etc/uci-defaults/58-apk-mirror`），
 且**只换域名** —— feed 路径、条目与 `kmods/<内核>-<hash>/` 结构原样保留。
 
