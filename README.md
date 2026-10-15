@@ -154,6 +154,15 @@ uci commit nginx
 /etc/init.d/nginx restart
 ```
 
+## 软件源
+
+镜像出厂时 `apk` 的更新源已换成**南京大学镜像**（`https://mirrors.nju.edu.cn/openwrt`），
+不再指向官方 `downloads.openwrt.org`。换源在**首次启动**时完成（`/etc/uci-defaults/58-apk-mirror`），
+且**只换域名** —— feed 路径、条目与 `kmods/<内核>-<hash>/` 结构原样保留。
+
+所以 `apk update` / `apk add` 开箱即用，不必自己换源。想改成别的源，直接编辑
+`/etc/apk/repositories.d/distfeeds.list`（脚本只在文件仍指向官方源时才动手，不会覆盖你的改动）。
+
 ## 许可
 
 MIT。镜像中的 OpenWrt 及其软件包各自遵循其原始许可（以 GPL 系列为主）。

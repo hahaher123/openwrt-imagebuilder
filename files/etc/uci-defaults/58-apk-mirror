@@ -1,0 +1,23 @@
+#!/bin/sh
+# 出厂 apk 更新源：官方 downloads.openwrt.org → 南京大学镜像（NJU）。
+#
+# 为什么用 uci-defaults 而不是打包时直接替换 /etc/apk/repositories.d/distfeeds.list：
+#   1) 该文件里有 targets/<t>/<s>/kmods/<内核版本>-<hash>/ 路径，hash 构建期才确定，
+#      静态模板写不出来，整份覆盖等于把内核版本钉死在模板里；
+#   2) 整份覆盖会吞掉上游将来新增的 feed —— 这里**只换域名**，路径与条目原样保留。
+#
+# 幂等：文件里已没有 downloads.openwrt.org 就什么都不做（用户自己换过源的也不动）。
+# 生效时机：首次启动（以及整盘 sysupgrade 之后会被重放 —— 该文件不是 conffile，
+#          新镜像的 base-files 会把它恢复成官方源，正好由本脚本再改回 NJU）。
+
+MIRROR="https://mirrors.nju.edu.cn/openwrt"
+FEED=/etc/apk/repositories.d/distfeeds.list
+
+if [ -f "$FEED" ] && grep -q 'downloads\.openwrt\.org' "$FEED"; then
+	sed -i "s|https://downloads\.openwrt\.org|${MIRROR}|g" "$FEED"
+	logger -t apk-mirror "distfeeds.list 已指向 ${MIRROR}"
+fi
+
+# uci-defaults 由 /etc/init.d/boot 以 source 方式执行：末句必须落在**必定成功**的语句上，
+# 否则返回非 0 时脚本不会被删除、每次启动重跑。（所以不放 exit / return。）
+true

@@ -501,12 +501,19 @@ jobs:
 
           # 两道静态守卫：语法错、或误用 exit/return（被 source 时会牵连调用方
           # 子 shell，且末尾返回非 0 会让脚本留在原地反复重跑）都会在设备上才暴露，
-          # 所以在这里就拦住。
-          sh -n "$target"
-          if grep -nE '^[[:space:]]*(exit|return)([[:space:]]|$)' "$target"; then
-            echo "::error::uci-defaults 脚本不能使用 exit / return（它会被 source 执行）"
-            exit 1
-          fi
+          # 所以在这里就拦住。**对所有 uci-defaults 脚本都查**（覆盖层是各目标共用的，
+          # 新增脚本自动受保护，不必每次回来加一行）。
+          for f in "$dst"/etc/uci-defaults/*; do
+            [ -f "$f" ] || continue
+            if ! sh -n "$f"; then
+              echo "::error::$(basename "$f") 语法错误"
+              exit 1
+            fi
+            if grep -nE '^[[:space:]]*(exit|return)([[:space:]]|$)' "$f"; then
+              echo "::error::$(basename "$f") 不能使用 exit / return（它会被 source 执行）"
+              exit 1
+            fi
+          done
 
           echo "--- 覆盖层内容 ---"
           find "$dst" -type f -printf '%M  %P\n' | sort
@@ -545,7 +552,7 @@ jobs:
           echo "--- disk after ---"
           df -h . | tail -1
 
-      - name: Verify the LAN address is baked in
+      - name: Verify the files overlay is baked in
         shell: bash
         env:
           IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
@@ -576,6 +583,21 @@ jobs:
             exit 1
           fi
           echo "已确认：出厂 LAN 地址 ${LAN_IP_IN} 写进了镜像的 /etc/uci-defaults/99-lan-ip"
+
+          # 同理：apk 换源脚本也要落位（首启时把 distfeeds 指向 NJU 的就是它）。
+          # 只验"脚本在镜像里且带 NJU 地址"—— 真正替换 distfeeds 发生在设备首启，
+          # 那一步由离线 harness 覆盖（tmp/ibprobe4/verify-apk-mirror.py，17 断言）。
+          m="$(find "ib/${IB_DIR}" -type f -path '*/etc/uci-defaults/58-apk-mirror' \
+                 -print -quit 2>/dev/null || true)"
+          if [ -z "$m" ]; then
+            echo "::error::镜像暂存 rootfs 里找不到 etc/uci-defaults/58-apk-mirror —— FILES 覆盖层没生效"
+            exit 1
+          fi
+          if ! grep -q 'mirrors\.nju\.edu\.cn/openwrt' "$m"; then
+            echo "::error::58-apk-mirror 里没有 NJU 地址"
+            exit 1
+          fi
+          echo "已确认：apk 换源脚本在镜像里，指向 mirrors.nju.edu.cn/openwrt"
 
       - name: Collect release artifacts
         id: art
