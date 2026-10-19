@@ -9,15 +9,18 @@ name: 每周检查 OpenWrt 上游版本
 #   是根本不派发。另一个仓库首版写 `0 2 * * 1`，那天 02:00 UTC 一次 run 都没产生。
 #   所以主探测放 02:17 UTC，另加一条周四兜底；脚本本身幂等，没更新就空跑退出。
 #
-# 跟进范围：**只跟同一 series（major.minor 相同）**。
-#   25.12.5 → 25.12.6 属 service release，包名、配置项、内核 ABI 都向后兼容，
-#   可以自动跟进；25.12.x → 26.03.x 是新 series，target / 包集 / 内核大版本都可能变，
-#   必须人工验证，本 workflow 不碰（打印 warning 后退出）。
+# 跟进范围：同 series 与跨 series 都跟，但闸门不同。
+#   25.12.5 → 25.12.6 属 service release，包名、配置项、内核 ABI 都向后兼容，直接跟进。
+#   25.12.x → 26.03.x 是新 series，target / 包集 / 内核大版本都可能变 —— 也跟，但
+#   **跟进前必须先过「包集核对」**：按 config/<arch>.conf 的 PACKAGES 逐项查官方 feed，
+#   再确认各 target 的 ImageBuilder 归档与索引都在。缺任何一项就整轮失败、不改版本号：
+#   自动发一个装不上自建包（natmap / oxidns / mihomo）或缺 kmod 的镜像是没有意义的。
+#   预发布版（rc / alpha / beta / snapshot / pre）一律不跟。
 #
-# 为什么要先确认产物可用：
-#   .versions.json 的 stable_version 往往比文件先更新。镜像站同步有延迟时，
-#   直接改版本号会让构建在下载 IB 那一步失败。所以在改之前逐个 HEAD 检查
-#   两个 target 的 sha256sums 与 ImageBuilder 归档，缺任何一个就等下次。
+# 为什么架构清单不写在这里：
+#   仓库约定「版本号与目标只在 config/ 下」—— config/<arch>.conf 是唯一事实源。
+#   本文件从 config/*.conf 读 CONF_ARCH / TARGET / SUBTARGET / IB_ARCH_TAG / IB_HOST_TAG，
+#   新增一个架构时不需要回来改这里。
 
 on:
   schedule:
@@ -54,6 +57,29 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: 读取架构清单（来自 config/*.conf）
+        id: archs
+        run: |
+          set -eu
+          OUT="$RUNNER_TEMP/archs.txt"
+          : > "$OUT"
+          for c in config/*.conf; do
+            [ "$(basename "$c")" = "build.conf" ] && continue
+            a=$(sed -n 's/^CONF_ARCH="\(.*\)"/\1/p'    "$c" | head -n1)
+            t=$(sed -n 's/^TARGET="\(.*\)"/\1/p'       "$c" | head -n1)
+            s=$(sed -n 's/^SUBTARGET="\(.*\)"/\1/p'    "$c" | head -n1)
+            it=$(sed -n 's/^IB_ARCH_TAG="\(.*\)"/\1/p' "$c" | head -n1)
+            ht=$(sed -n 's/^IB_HOST_TAG="\(.*\)"/\1/p' "$c" | head -n1)
+            if [ -z "$a" ] || [ -z "$t" ] || [ -z "$it" ] || [ -z "$ht" ]; then
+              echo "::error::${c} 缺 CONF_ARCH / TARGET / IB_ARCH_TAG / IB_HOST_TAG"
+              exit 1
+            fi
+            echo "${a}|${t}|${s}|${it}|${ht}" >> "$OUT"
+          done
+          echo "--- 架构清单（CONF_ARCH|TARGET|SUBTARGET|IB_ARCH_TAG|IB_HOST_TAG）---"
+          cat "$OUT"
+          echo "count=$(wc -l < "$OUT")" >> "$GITHUB_OUTPUT"
 
       - name: 探测上游最新稳定版
         id: probe
@@ -93,18 +119,14 @@ jobs:
           SAME_SERIES=false
           [ "$LATEST_SERIES" = "$CUR_SERIES" ] && SAME_SERIES=true
 
-          # 只在「同 series 且排序更大」时跟进：既避免跨大版本乱跳，也避免上游回退
-          # （或本仓库超前）时把自己降级。预发布版直接判为不跟进。
+          # 只要「排序更大」就跟进：同 series 的 service release 直接跟；跨 series
+          # 也跟，但后面多一道包集核对闸门。预发布版一律不跟。
+          # 用 sort -V 比较而不是字符串比较，避免 25.12.10 被 25.12.9 判成更小；
+          # 同时保证上游回退（或本仓库超前）时不会把自己降级。
           NEWER=false
-          if [ "$PRERELEASE" = false ] && [ "$SAME_SERIES" = true ] && [ "$LATEST" != "$CUR" ] && \
+          if [ "$PRERELEASE" = false ] && [ "$LATEST" != "$CUR" ] && \
              [ "$(printf '%s\n%s\n' "$CUR" "$LATEST" | sort -V | tail -n1)" = "$LATEST" ]; then
             NEWER=true
-          fi
-
-          CROSS_SERIES=false
-          if [ "$PRERELEASE" = false ] && [ "$LATEST_SERIES" != "$CUR_SERIES" ] && \
-             [ "$(printf '%s\n%s\n' "$CUR_SERIES" "$LATEST_SERIES" | sort -V | tail -n1)" = "$LATEST_SERIES" ]; then
-            CROSS_SERIES=true
           fi
 
           {
@@ -119,36 +141,62 @@ jobs:
             echo "| 需要跟进 | ${NEWER} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$CROSS_SERIES" = true ]; then
-            echo "::warning::上游已进入新 series ${LATEST_SERIES}（当前 ${CUR_SERIES}）。跨大版本不自动跟，请人工验证 target/包集/内核后再改 VERSION"
+          if [ "$SAME_SERIES" = false ] && [ "$NEWER" = true ]; then
+            echo "::notice::跨 series 升级（${CUR_SERIES} -> ${LATEST_SERIES}）：跟进前会先核对包集与产物"
           fi
 
-          echo "current=${CUR}"       >> "$GITHUB_OUTPUT"
-          echo "latest=${LATEST}"     >> "$GITHUB_OUTPUT"
-          echo "newer=${NEWER}"       >> "$GITHUB_OUTPUT"
+          echo "current=${CUR}"             >> "$GITHUB_OUTPUT"
+          echo "latest=${LATEST}"           >> "$GITHUB_OUTPUT"
+          echo "newer=${NEWER}"             >> "$GITHUB_OUTPUT"
           echo "same_series=${SAME_SERIES}" >> "$GITHUB_OUTPUT"
 
-      - name: 确认该版本的两个 target 已在下载站就位
+      - name: 确认该版本的各 target 已在下载站就位
         if: steps.probe.outputs.newer == 'true'
         env:
           LATEST: ${{ steps.probe.outputs.latest }}
         run: |
           set -eu
-          # 这就是上面注释说的「先确认产物可用」：4 条路径全部 200 才继续，
-          # 否则直接失败退出（本周不跟进，下周再来）。
-          for p in \
-            "releases/${LATEST}/targets/x86/64/sha256sums" \
-            "releases/${LATEST}/targets/rockchip/armv8/sha256sums" \
-            "releases/${LATEST}/targets/x86/64/openwrt-imagebuilder-${LATEST}-x86-64.Linux-x86_64.tar.zst" \
-            "releases/${LATEST}/targets/rockchip/armv8/openwrt-imagebuilder-${LATEST}-rockchip-armv8.Linux-x86_64.tar.zst" ; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
-                     "https://downloads.openwrt.org/${p}" || true)
-            echo "  ${code}  ${p}"
-            if [ "$code" != "200" ]; then
-              echo "::error::${LATEST} 的产物尚未在下载站就位（${p} -> ${code}），本次不跟进"
-              exit 1
-            fi
-          done
+          # 镜像站同步有延迟：.versions.json 常比文件先更新。这里按 config 里的
+          # TARGET/SUBTARGET/IB_ARCH_TAG/IB_HOST_TAG 拼出真实路径逐个 HEAD，
+          # 缺任何一个就不跟进（等下周再试），避免构建挂在下载 IB 那一步。
+          while IFS='|' read -r a t s it ht; do
+            [ -n "$a" ] || continue
+            for p in \
+              "releases/${LATEST}/targets/${t}/${s}/sha256sums" \
+              "releases/${LATEST}/targets/${t}/${s}/openwrt-imagebuilder-${LATEST}-${it}.${ht}.tar.zst" ; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+                       "https://downloads.openwrt.org/${p}" || true)
+              echo "  ${code}  ${p}"
+              if [ "$code" != "200" ]; then
+                echo "::error::${LATEST} 的产物尚未在下载站就位（${p} -> ${code}），本次不跟进"
+                exit 1
+              fi
+            done
+          done < "$RUNNER_TEMP/archs.txt"
+
+      # ★ 跨 series 的主闸门。同 series 的 service release 跳过这一步（包集不会变）；
+      # 跨大版本时必须先确认 config/<arch>.conf 里的每个包在新 feed 里还在 ——
+      # 新 series 移除 / 改名包很常见。
+      - name: 跨 series 时核对包集
+        if: steps.probe.outputs.newer == 'true' && steps.probe.outputs.same_series == 'false'
+        env:
+          LATEST: ${{ steps.probe.outputs.latest }}
+        run: |
+          set -eu
+          rc=0
+          while IFS='|' read -r a _; do
+            [ -n "$a" ] || continue
+            echo "::group::check-packages ${a} ${LATEST}"
+            # 非零即不通过；不 break，让每个架构的缺失项都打出来再一起判
+            python3 scripts/check-packages.py "$a" "$LATEST" || rc=1
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/archs.txt"
+
+          if [ "$rc" != 0 ]; then
+            echo "::error::${LATEST} 下包集核对未通过（缺失项见上面各 group），本次不跟进、不改版本号"
+            exit 1
+          fi
+          echo "包集核对通过：config 里各架构的 PACKAGES 在 ${LATEST} 下全部存在"
 
       - name: 改写 build.conf 并推送
         if: steps.probe.outputs.newer == 'true' || inputs.force
@@ -174,7 +222,7 @@ jobs:
           git commit -m "chore: 跟进 OpenWrt 上游 ${LATEST}"
           git push origin HEAD:main
 
-      - name: 触发两个架构的构建与发布
+      - name: 触发各架构的构建与发布
         if: steps.probe.outputs.newer == 'true' || inputs.force
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -182,12 +230,13 @@ jobs:
           set -eu
           # 必须显式 dispatch：GITHUB_TOKEN 推送产生的 commit 不会触发 push 型
           # workflow（GitHub 防递归），不 dispatch 就等于只改了个版本号、什么都没构建。
-          # 两个 arch 在 build-image.yml 里共享 concurrency，会串行执行。
-          for a in x86_64 r2s; do
+          # 各架构在 build-image.yml 里共享 concurrency，会串行执行。
+          while IFS='|' read -r a _; do
+            [ -n "$a" ] || continue
             gh workflow run build-image.yml --ref main -f arch="$a"
             echo "已触发 build-image.yml  arch=${a}"
-          done
+          done < "$RUNNER_TEMP/archs.txt"
 
       - name: 无新版本
         if: steps.probe.outputs.newer != 'true' && !inputs.force
-        run: echo "上游稳定版与 build.conf 一致、更旧，或属跨 series（已跳过），本次不做改动。"
+        run: echo "上游稳定版与 build.conf 一致、更旧，或是预发布版（已跳过），本次不做改动。"

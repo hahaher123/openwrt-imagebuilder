@@ -59,7 +59,9 @@ on:
     paths:
       - "config/**"
       - "files/**"
-      - "scripts/**"
+      # 只列真正参与构建的脚本。scripts/check-packages.py 是校验工具（upstream-check
+      # 在跨 series 跟进前调用它），改它不该白重建一次镜像。
+      - "scripts/fetch-custom-packages.py"
       - ".github/workflows/build-image.yml"
 
 permissions:
