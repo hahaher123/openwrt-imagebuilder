@@ -527,6 +527,75 @@ jobs:
           sed 's/^/    /' "$target"
           echo "files_dir=$dst" >> "$GITHUB_OUTPUT"
 
+      - name: Stage v2ray geo data into the overlay
+        id: geo
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILES_DIR: ${{ steps.files.outputs.files_dir }}
+        run: |
+          set -euo pipefail
+
+          # PACKAGES 里的 v2ray-geoip / v2ray-geosite 内置的是 **v2fly** 的数据
+          # （v2fly/geoip 与 v2fly/domain-list-community）。本仓库要的是
+          # Loyalsoldier/v2ray-rules-dat 的最新构建，所以两个包只用来让
+          # /usr/share/v2ray/{geoip.dat,geosite.dat} 在 apk 层有归属，
+          # 实际内容由这一步覆盖：
+          #   include/rootfs.mk 的 prepare_rootfs 在装完包之后才 file_copy 覆盖层，
+          #   后写者赢 ⇒ 镜像里落地的是这里下载的版本。
+          #
+          # 设备侧刷新由 oxidns 的 download 插件负责（144h 一次），
+          # mihomo 包已不再打包、也不再更新这两份文件。
+          dst="${FILES_DIR}/usr/share/v2ray"
+          mkdir -p "$dst"
+
+          api="https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases/latest"
+          # 带 token 查 API：匿名额度只有 60 次/小时，构建频繁时会被打空。
+          tag="$(curl -fsSL --retry 3 --retry-delay 5 \
+                   -H "Authorization: Bearer ${GH_TOKEN}" \
+                   -H "Accept: application/vnd.github+json" \
+                   "$api" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+          if [ -z "${tag:-}" ]; then
+            echo "::error::拿不到 Loyalsoldier/v2ray-rules-dat 的最新发布 tag"
+            exit 1
+          fi
+          echo "v2ray-rules-dat 最新发布: ${tag}"
+
+          base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${tag}"
+          for f in geoip.dat geosite.dat; do
+            curl -fSL --retry 3 --retry-delay 5 -o "${dst}/${f}" "${base}/${f}"
+            curl -fSL --retry 3 --retry-delay 5 -o "${dst}/${f}.sha256sum" "${base}/${f}.sha256sum"
+
+            # 官方给的是 `<hash>  <name>` 一行。不直接用 sha256sum -c：
+            # 万一其中文件名与资产名不一致，-c 会找不到文件而误报失败。
+            want="$(awk '{print $1}' "${dst}/${f}.sha256sum")"
+            got="$(sha256sum "${dst}/${f}" | awk '{print $1}')"
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "::error::${f} 校验失败：期望 ${want:-<空>}，实得 ${got}"
+              exit 1
+            fi
+            rm -f "${dst}/${f}.sha256sum"
+
+            size="$(stat -c%s "${dst}/${f}")"
+            if [ "$size" -lt 1000000 ]; then
+              echo "::error::${f} 只有 ${size} 字节，不像是完整数据文件（多半拿到的是错误页）"
+              exit 1
+            fi
+            echo "  ${f}: ${size} 字节  sha256 ${got}"
+            case "$f" in
+              geoip.dat) echo "geoip_sha256=${got}" >> "$GITHUB_OUTPUT" ;;
+              geosite.dat) echo "geosite_sha256=${got}" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+          echo "geo_tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### v2ray geo 数据"
+            echo
+            echo "- 来源：Loyalsoldier/v2ray-rules-dat \`${tag}\`"
+            echo "- 落点：\`/usr/share/v2ray/{geoip.dat,geosite.dat}\`（覆盖 v2ray-geoip / v2ray-geosite 自带内容）"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build image
         shell: bash
         working-directory: ib/${{ steps.cfg.outputs.ib_dir }}
@@ -680,6 +749,56 @@ jobs:
           echo "--- release payload ---"
           ls -la
 
+      - name: Verify the v2ray geo data in the image
+        shell: bash
+        env:
+          IB_DIR: ${{ steps.cfg.outputs.ib_dir }}
+          GEO_TAG: ${{ steps.geo.outputs.geo_tag }}
+          GEOIP_SHA: ${{ steps.geo.outputs.geoip_sha256 }}
+          GEOSITE_SHA: ${{ steps.geo.outputs.geosite_sha256 }}
+          MANIFEST: out/${{ steps.art.outputs.manifest }}
+        run: |
+          set -euo pipefail
+
+          # 1) 两个官方包必须真的装进去了。没装上的话 /usr/share/v2ray 下的文件
+          #    没有任何包拥有，`apk info` 查不到，设备上也没法按包升级；
+          #    跨 series 跟进时最容易在这里暴露（官方源删包 / 改名）。
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::找不到 manifest: ${MANIFEST}"
+            ls -la out || true
+            exit 1
+          fi
+          for p in v2ray-geoip v2ray-geosite; do
+            line="$(grep -m1 "^${p} " "$MANIFEST" || true)"
+            if [ -z "$line" ]; then
+              echo "::error::manifest 里没有 ${p} —— 官方源里可能已经没有这个包了"
+              grep -i 'v2ray' "$MANIFEST" || true
+              exit 1
+            fi
+            echo "  in manifest: ${line}"
+          done
+
+          # 2) 覆盖层必须赢过包自带的数据：暂存 rootfs 里的两份 dat，sha256 要等于
+          #    构建时从 Loyalsoldier 下载的那两份。这一步是「实际文件替换」的实证，
+          #    只靠日志里的下载成功说明不了 FILES 覆盖真的生效。
+          for pair in "geoip.dat:${GEOIP_SHA}" "geosite.dat:${GEOSITE_SHA}"; do
+            f="${pair%%:*}"
+            want="${pair#*:}"
+            path="$(find "ib/${IB_DIR}" -type f -path "*/usr/share/v2ray/${f}" -print -quit 2>/dev/null || true)"
+            if [ -z "$path" ]; then
+              echo "::error::镜像暂存 rootfs 里没有 /usr/share/v2ray/${f} —— 覆盖层没生效"
+              exit 1
+            fi
+            got="$(sha256sum "$path" | awk '{print $1}')"
+            if [ "$got" != "$want" ]; then
+              echo "::error::/usr/share/v2ray/${f} 不是 Loyalsoldier ${GEO_TAG} 那一份"
+              echo "::error::  期望 ${want} / 实得 ${got}"
+              exit 1
+            fi
+            echo "  ok: /usr/share/v2ray/${f}  ${got}"
+          done
+          echo "已确认：镜像里的 v2ray geo 数据是 Loyalsoldier/v2ray-rules-dat ${GEO_TAG}"
+
       - name: Verify the custom packages are in the image
         if: steps.custom.outputs.custom_pkgs != ''
         shell: bash
@@ -767,6 +886,7 @@ jobs:
           IMG: ${{ steps.art.outputs.img }}
           BYTES: ${{ steps.art.outputs.bytes }}
           SHA: ${{ steps.art.outputs.sha256 }}
+          GEO_TAG: ${{ steps.geo.outputs.geo_tag }}
         run: |
           set -euo pipefail
 
@@ -794,6 +914,7 @@ jobs:
             echo "| rootfs 分区 | ${SIZE_OUT} MiB |"
             echo "| 镜像变体 | ${VARIANT_DESC_OUT} |"
             echo "| 出厂 LAN 地址 | ${LAN_IP_OUT} |"
+            echo "| geo 数据 | Loyalsoldier/v2ray-rules-dat \`${GEO_TAG:-n/a}\` → /usr/share/v2ray |"
             echo "| 已安装软件包 | ${pkgcount} 个 |"
             echo "| 文件 | ${IMG} |"
             echo "| 大小 | ${human} |"

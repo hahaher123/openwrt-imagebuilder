@@ -106,6 +106,9 @@ sysupgrade -T <镜像>
   `kmod-dwmac-intel`、`kmod-amazon-ena`；`kmod-drm-i915`；`grub2-bios-setup`；`kmod-button-hotplug`
 * **仅 r2s**：`kmod-usb-net-rtl8152`（第二个千兆口挂在 USB 3.0 上，缺它就只剩一个网口）、
   `uboot-envtools`、`kmod-gpio-button-hotplug`
+* **地理数据**：`v2ray-geoip`、`v2ray-geosite`（官方 `net/v2ray-geodata` 产出），落点是
+  `/usr/share/v2ray/{geoip.dat,geosite.dat}`。镜像里这两个文件的内容**不是** v2fly 原件 ——
+  构建时会被换成 Loyalsoldier 的最新发布，见下面的「地理数据」一节。
 
 此外还装入一批**不在官方源里**的包，构建时从各自仓库的最新 Release 抓取：
 
@@ -119,6 +122,30 @@ sysupgrade -T <镜像>
 
 取的都是各仓库的**最新 Release**，所以这些包的版本由上游决定、不由本仓库固定。完整清单以设备上
 执行 `apk list --installed` 为准。
+
+### 地理数据（geoip.dat / geosite.dat）
+
+两个 v2ray 地理数据库在整机里只有**一份**，落在 `/usr/share/v2ray/`：
+
+| 文件 | 用途 | apk 归属 | 谁更新 |
+| --- | --- | --- | --- |
+| `geoip.dat` | oxidns 的 `geoip` provider（`cn` 段） | `v2ray-geoip` | oxidns |
+| `geosite.dat` | oxidns 的 `geosite` provider（`gfw` / `google` / `category-ads*` …） | `v2ray-geosite` | oxidns |
+
+* **内容来源**：构建时从 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat)
+  取最新发布，按官方 `.sha256sum` 校验后写进 `FILES` 覆盖层。覆盖层在装包**之后**才拷贝，
+  所以镜像里落地的是 Loyalsoldier 那份，而不是包自带的 v2fly 数据。用了哪个 tag 会写在 Release 正文里。
+* **运行时刷新**：由设备上的 oxidns 负责 —— `download` 插件的目标目录就是 `/usr/share/v2ray`，
+  默认 144 小时一次，下完再热重载 provider。mihomo 不参与，也**不再打包**这两个文件。
+* **apk 视角**：文件仍由 `v2ray-geoip` / `v2ray-geosite` 拥有，但内容被覆盖层换过，
+  所以 `apk audit` 会把它们标成「已修改」—— 这是预期状态。
+* **mihomo**：默认 `geodata-mode: false`，GEOIP 规则走 `Country.mmdb`（仍随 mihomo 包发布到
+  `/etc/mihomo/`），这两个 `.dat` 平时不会被打开。真要用 `GEOSITE` 规则时把名字链过去即可：
+
+  ```
+  ln -sf /usr/share/v2ray/geoip.dat   /etc/mihomo/geoip.dat
+  ln -sf /usr/share/v2ray/geosite.dat /etc/mihomo/geosite.dat
+  ```
 
 ### R2S 专属：接口定向与系统调优
 
