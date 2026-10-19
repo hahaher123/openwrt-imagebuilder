@@ -781,21 +781,38 @@ jobs:
           # 2) 覆盖层必须赢过包自带的数据：暂存 rootfs 里的两份 dat，sha256 要等于
           #    构建时从 Loyalsoldier 下载的那两份。这一步是「实际文件替换」的实证，
           #    只靠日志里的下载成功说明不了 FILES 覆盖真的生效。
+          #
+          #    ⚠️ 只能在**工作副本**里找，且要排除 root.orig-*：
+          #    IB 的 prepare_rootfs 先 `cp $TARGET_DIR $TARGET_DIR_ORIG`（装完包、
+          #    还没拷 FILES 的快照，目录名 root.orig-<board>），再往 $TARGET_DIR 拷覆盖层。
+          #    root.orig 里躺着的是包自带的 v2fly 数据，全树 `find -print -quit`
+          #    一旦先撞上它就报「覆盖层没生效」的假失败（2026-10-19 run 39233383588 实测：
+          #    文件其实是对的，是找错了目录）。staging_dir 下另有一份纯净 rootfs，
+          #    同样没有覆盖层，所以范围收在 build_dir。
           for pair in "geoip.dat:${GEOIP_SHA}" "geosite.dat:${GEOSITE_SHA}"; do
             f="${pair%%:*}"
             want="${pair#*:}"
-            path="$(find "ib/${IB_DIR}" -type f -path "*/usr/share/v2ray/${f}" -print -quit 2>/dev/null || true)"
-            if [ -z "$path" ]; then
-              echo "::error::镜像暂存 rootfs 里没有 /usr/share/v2ray/${f} —— 覆盖层没生效"
+            mapfile -t cands < <(find "ib/${IB_DIR}/build_dir" -type f \
+                                   -path "*/usr/share/v2ray/${f}" \
+                                   ! -path '*/root.orig-*' -print 2>/dev/null)
+            if [ "${#cands[@]}" -eq 0 ]; then
+              echo "::error::工作 rootfs 里没有 /usr/share/v2ray/${f} —— 覆盖层没生效"
+              find "ib/${IB_DIR}/build_dir" -type d -name 'root*' -print 2>/dev/null || true
               exit 1
             fi
+            if [ "${#cands[@]}" -gt 1 ]; then
+              echo "::error::${#cands[@]} 个候选 ${f}，无法确定哪个是出镜像用的 rootfs："
+              printf '  %s\n' "${cands[@]}"
+              exit 1
+            fi
+            path="${cands[0]}"
             got="$(sha256sum "$path" | awk '{print $1}')"
             if [ "$got" != "$want" ]; then
               echo "::error::/usr/share/v2ray/${f} 不是 Loyalsoldier ${GEO_TAG} 那一份"
               echo "::error::  期望 ${want} / 实得 ${got}"
               exit 1
             fi
-            echo "  ok: /usr/share/v2ray/${f}  ${got}"
+            echo "  ok: ${path}  ${got}"
           done
           echo "已确认：镜像里的 v2ray geo 数据是 Loyalsoldier/v2ray-rules-dat ${GEO_TAG}"
 
