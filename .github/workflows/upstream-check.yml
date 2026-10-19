@@ -150,29 +150,86 @@ jobs:
           echo "newer=${NEWER}"             >> "$GITHUB_OUTPUT"
           echo "same_series=${SAME_SERIES}" >> "$GITHUB_OUTPUT"
 
-      - name: 确认该版本的各 target 已在下载站就位
+      - name: 确认就位并核对 ImageBuilder 命名（以上游真实文件名为准）
+        id: naming
         if: steps.probe.outputs.newer == 'true'
         env:
           LATEST: ${{ steps.probe.outputs.latest }}
         run: |
           set -eu
-          # 镜像站同步有延迟：.versions.json 常比文件先更新。这里按 config 里的
-          # TARGET/SUBTARGET/IB_ARCH_TAG/IB_HOST_TAG 拼出真实路径逐个 HEAD，
-          # 缺任何一个就不跟进（等下周再试），避免构建挂在下载 IB 那一步。
+          # 不拿 config 里的 IB_ARCH_TAG 去"猜"文件名 —— 上游的命名规则变过
+          # （x86_64 → x86-64 就发生在 25.12.x 期间）。这里直接列上游目录，从
+          # **真实文件名**里取出 <arch_tag>.<host_tag>，再和 config 对比：
+          #   · 一致   → 什么都不做
+          #   · 不一致 → 改写 config（否则 build-image.yml 下载 IB 时必然 404）
+          #   · 找不到 → 报错退出：版本/目录不对，或上游改了产物命名，得人看
+          changed=0
           while IFS='|' read -r a t s it ht; do
             [ -n "$a" ] || continue
-            for p in \
-              "releases/${LATEST}/targets/${t}/${s}/sha256sums" \
-              "releases/${LATEST}/targets/${t}/${s}/openwrt-imagebuilder-${LATEST}-${it}.${ht}.tar.zst" ; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
-                       "https://downloads.openwrt.org/${p}" || true)
-              echo "  ${code}  ${p}"
-              if [ "$code" != "200" ]; then
-                echo "::error::${LATEST} 的产物尚未在下载站就位（${p} -> ${code}），本次不跟进"
-                exit 1
-              fi
-            done
+            dir="https://downloads.openwrt.org/releases/${LATEST}/targets/${t}/${s}"
+            echo "::group::${a}   (${t}/${s})"
+
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "${dir}/sha256sums" || true)
+            echo "  ${code}  ${dir}/sha256sums"
+            if [ "$code" != "200" ]; then
+              echo "::error::${LATEST} 的 ${t}/${s} 索引不存在（${code}），本次不跟进"
+              exit 1
+            fi
+
+            html=$(curl -fsSL --max-time 60 "${dir}/" || true)
+            actual=$(printf '%s' "$html" \
+              | grep -oE "openwrt-imagebuilder-${LATEST//./\\.}-[A-Za-z0-9._-]+\.tar\.zst" \
+              | head -n1)
+            if [ -z "$actual" ]; then
+              echo "::error::在 ${dir}/ 里找不到 openwrt-imagebuilder-${LATEST}-*.tar.zst"
+              echo "::error::上游可能改了产物命名、或该 target 还没出 ImageBuilder，需人工确认"
+              exit 1
+            fi
+            echo "  上游实际: ${actual}"
+
+            # 形如 openwrt-imagebuilder-<ver>-<arch_tag>.<host_tag>.tar.zst
+            pair=${actual#openwrt-imagebuilder-${LATEST}-}
+            pair=${pair%.tar.zst}
+            real_arch=${pair%.*}
+            real_host=${pair##*.}
+
+            echo "  config  : IB_ARCH_TAG=${it}   IB_HOST_TAG=${ht}"
+            echo "  上游    : IB_ARCH_TAG=${real_arch}   IB_HOST_TAG=${real_host}"
+            if [ "$real_arch" != "$it" ] || [ "$real_host" != "$ht" ]; then
+              echo "::warning::${a} 的 ImageBuilder 命名与 config 不一致，按上游改写（否则 build-image.yml 会 404）"
+              sed -i "s|^IB_ARCH_TAG=\".*\"|IB_ARCH_TAG=\"${real_arch}\"|" "config/${a}.conf"
+              sed -i "s|^IB_HOST_TAG=\".*\"|IB_HOST_TAG=\"${real_host}\"|" "config/${a}.conf"
+              changed=1
+            fi
+
+            # RELEASE_VARIANT 也跟上游核对：它是产物文件名的一部分
+            # （openwrt-<ver>-<arch_tag>-<profile>-<variant>.img.gz），
+            # 上游改命名的话，包集核对查不出来，只会在构建末尾 ImageBuilder
+            # 找不到产物时才炸。这里提前断一次。
+            # 注意只核对、不自动改：ext4 / squashfs 是我们的选择，不能替人决定。
+            variant=$(sed -n 's/^RELEASE_VARIANT="\(.*\)"/\1/p' "config/${a}.conf" | head -n1)
+            profile=$(sed -n 's/^PROFILE="\(.*\)"/\1/p'        "config/${a}.conf" | head -n1)
+            [ -n "$variant" ] && [ -n "$profile" ] || { echo "::error::${a} 的 conf 缺 PROFILE 或 RELEASE_VARIANT"; exit 1; }
+
+            want="openwrt-${LATEST}-${real_arch}-${profile}-${variant}.img.gz"
+            if printf '%s' "$html" | grep -qF -- "$want"; then
+              echo "  RELEASE_VARIANT=${variant}  ✓ 上游存在 ${want}"
+            else
+              echo "::error::上游不存在 ${want}（RELEASE_VARIANT=${variant} 可能已改名）"
+              echo "::error::该 target 下实际存在的镜像变体："
+              printf '%s' "$html" \
+                | grep -oE "openwrt-${LATEST//./\\.}-[A-Za-z0-9_.-]+\.img\.gz" | sort -u \
+                | head -n 20 | sed 's/^/    /'
+              exit 1
+            fi
+            echo "::endgroup::"
           done < "$RUNNER_TEMP/archs.txt"
+
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = "1" ]; then
+            echo "--- config 命名已更新，摘录 ---"
+            grep -H '^IB_ARCH_TAG=\|^IB_HOST_TAG=' config/*.conf
+          fi
 
       # ★ 跨 series 的主闸门。同 series 的 service release 跳过这一步（包集不会变）；
       # 跨大版本时必须先确认 config/<arch>.conf 里的每个包在新 feed 里还在 ——
@@ -211,15 +268,22 @@ jobs:
           echo "--- 改写后 ---"
           grep -E '^VERSION=|^ARCH=' "$BUILD_CONF"
 
-          if git diff --quiet -- "$BUILD_CONF"; then
-            echo "版本未变化（force 模式）：跳过提交，直接触发构建"
+          # 上一步可能改过 config/<arch>.conf 的 IB_ARCH_TAG / IB_HOST_TAG，
+          # 所以这里整个 config/ 一起看，不能只盯 build.conf。
+          if git diff --quiet -- config/; then
+            echo "版本与构建参数都没变化（force 模式）：跳过提交，直接触发构建"
             exit 0
           fi
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add "$BUILD_CONF"
-          git commit -m "chore: 跟进 OpenWrt 上游 ${LATEST}"
+          git add config/
+          git diff --cached --stat
+          if [ "${{ steps.naming.outputs.changed }}" = "1" ]; then
+            git commit -m "chore: 跟进 OpenWrt 上游 ${LATEST}（含 ImageBuilder 命名）"
+          else
+            git commit -m "chore: 跟进 OpenWrt 上游 ${LATEST}"
+          fi
           git push origin HEAD:main
 
       - name: 触发各架构的构建与发布
