@@ -674,6 +674,27 @@ jobs:
           fi
           echo "已确认：apk 换源脚本在镜像里，指向 mirror.nju.edu.cn/openwrt"
 
+          # 再验 sysupgrade 保留清单：升级时 /etc/mihomo 与 /etc/oxidns 要整目录保住。
+          # ⚠️ 这里必须排除 root.orig-* 快照 —— 它里面那份 /etc/sysupgrade.conf 是
+          #    官方原版（只有注释），先撞上它就会报「条目缺失」的假失败。
+          #     展开成文件清单（find -type f）是设备上 sysupgrade 干的活，不在 CI 里模拟：
+          #     已实测 sysupgrade -l 得 194 条 mihomo + 15 条 oxidns，-b 出 20 MB 包。
+          mapfile -t sc < <(find "ib/${IB_DIR}/build_dir" -type f \
+                             -path '*/etc/sysupgrade.conf' \
+                             ! -path '*/root.orig-*' -print 2>/dev/null)
+          if [ "${#sc[@]}" -ne 1 ]; then
+            echo "::error::工作 rootfs 里 etc/sysupgrade.conf 的候选数为 ${#sc[@]}（应为 1）—— 覆盖层没生效"
+            printf '  %s\n' "${sc[@]}" 2>/dev/null || true
+            exit 1
+          fi
+          for d in /etc/mihomo/ /etc/oxidns/; do
+            if ! grep -qxF "$d" "${sc[0]}"; then
+              echo "::error::etc/sysupgrade.conf 缺少条目 ${d}"
+              exit 1
+            fi
+          done
+          echo "已确认：/etc/sysupgrade.conf 含 /etc/mihomo/ 与 /etc/oxidns/（升级时整目录保留）"
+
       - name: Collect release artifacts
         id: art
         shell: bash

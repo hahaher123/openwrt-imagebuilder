@@ -79,6 +79,21 @@ sysupgrade -T <镜像>
 （rootfs 104 MiB）首次切过来时，会因分区大小不同而整盘写一次 —— 这一次请先 `sysupgrade -b` 把配置
 备份到电脑上，且数据不要放在系统盘。
 
+### 升级时保留的配置
+
+镜像出厂带 `/etc/sysupgrade.conf`（源文件 `files/etc/sysupgrade.conf`），把这两个目录**整目录**列入备份：
+
+| 目录 | 内容 | 体积 |
+| --- | --- | --- |
+| `/etc/mihomo/` | `config.yaml`（用户配置）、`config.sh`、`ruleset/`、`ui/` 定制、`sources` | 33 MB（含 mmdb / cache.db） |
+| `/etc/oxidns/` | `config.yaml`、`rule/*.txt` 分流规则 | 76 KB |
+
+* 包自带的 `/lib/upgrade/keep.d/*` 与这里取**并集**：mihomo 包只保 `config.yaml`，其余靠本文件补全；
+  oxidns 包已列 `/etc/oxidns/` 与 `/usr/share/v2ray/`，本文件再列一次是镜像级兜底（重复不会重复打包）。
+* `sysupgrade` 用 `find` 展开目录、只收 `-type f` 与 `-type l` ⇒ **空目录不会还原**；
+  `/etc/mihomo/{geoip,geosite}.dat` 这两个指向 `/usr/share/v2ray/` 的软链接按链接保存。
+* 备份包实测约 **20 MB**（mmdb 压缩后），写入内存盘 `/tmp/sysupgrade.tgz`。
+
 ## 包含的软件包
 
 在官方对应 profile 的默认包集之上追加。
