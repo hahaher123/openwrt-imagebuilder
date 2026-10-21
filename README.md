@@ -87,7 +87,7 @@ sysupgrade -T <镜像>
   `luci-app-attendedsysupgrade`、`luci-proto-wireguard`
 * **简体中文界面**：`luci-i18n-base-zh-cn`、`luci-i18n-firewall-zh-cn`、
   `luci-i18n-package-manager-zh-cn`、`luci-i18n-ttyd-zh-cn`、`luci-i18n-sqm-zh-cn`、
-  `luci-i18n-unbound-zh-cn`、`luci-i18n-irqbalance-zh-cn`
+  `luci-i18n-irqbalance-zh-cn`
 * **网络与代理**：`nftables`、`kmod-nft-tproxy`、`kmod-nft-offload`、`natmap`、`ethtool`
 * **其他**：`dnsmasq-full`（替代默认的 `dnsmasq`）、`kmod-fs-vfat`（挂 U 盘）
 * **拥塞控制**：`kmod-tcp-bbr`（BBR）。⚠️ 装在镜像里只是让 bbr **可选**（内核里它是模块），
