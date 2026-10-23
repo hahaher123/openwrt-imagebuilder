@@ -15,6 +15,13 @@ ImageBuilder 根目录的 `packages/` 是官方留给本地包的目录：把 .a
 
 资产可以直接是一个 .apk，也可以是一个内含 .apk 的 .tar.gz 归档
 （sirpdboy/luci-app-ddns-go 就是后者：每个架构一个 tar.gz，里面放几个 apk）。
+
+一行可以有额外的排除字段：`owner/repo|资产glob|!排除glob1|!排除glob2`。
+排除 glob 同时作用于「资产名」和「归档内的 apk 文件名」——
+用于一个归档里混着多个包、但只要其中一部分的场景
+（如 sirpdboy 的 tar.gz 里带 ddns-go 二进制，而镜像改用
+hahaher123/openwrt-ddns-go 的自编版本，归档里的那份必须剔掉，
+否则同名包冲突会让整个抓取失败）。
 两种情况都能处理，配置里不用区分。
 
 校验：每个包都必须是 apk-tools 3 的 ADB 容器（OpenWrt 25.12 格式），
@@ -248,15 +255,23 @@ def main(argv=None):
     for spec in specs:
         if "|" not in spec:
             raise SystemExit("CUSTOM_ASSETS 里的行必须形如 owner/repo|资产glob：%s" % spec)
-        repo, pattern = spec.split("|", 1)
-        repo, pattern = repo.strip(), pattern.strip()
+        fields = [f.strip() for f in spec.split("|")]
+        repo, pattern = fields[0], fields[1]
+        # 排除字段以 ! 开头：同时过滤「资产名」和「tar.gz 内的 apk 文件名」
+        excludes = [f[1:] for f in fields[2:] if f.startswith("!")]
+        if not excludes and len(fields) > 2:
+            raise SystemExit("CUSTOM_ASSETS 排除字段必须以 ! 开头：%s" % spec)
 
         if repo not in release_cache:
             release_cache[repo] = latest_release(repo, token)
         tag, assets = release_cache[repo]
 
-        matched = sorted(n for n in assets if fnmatch.fnmatchcase(n, pattern))
-        print("[%s] tag=%s  按 %r 匹配到 %d 个资产" % (repo, tag, pattern, len(matched)))
+        matched = sorted(n for n in assets
+                         if fnmatch.fnmatchcase(n, pattern)
+                         and not any(fnmatch.fnmatchcase(n, e) for e in excludes))
+        print("[%s] tag=%s  按 %r 匹配到 %d 个资产%s"
+              % (repo, tag, pattern, len(matched),
+                 "" if not excludes else "（排除 %s）" % excludes))
         if not matched:
             print("   可用资产（前 12 个）：")
             for n in sorted(assets)[:12]:
@@ -275,6 +290,9 @@ def main(argv=None):
                 continue
 
             for fname, data in members:
+                if any(fnmatch.fnmatchcase(fname, e) for e in excludes):
+                    print("      ⊘ 跳过 %s（命中排除 %s）" % (fname, "/".join(excludes)))
+                    continue
                 where = "%s / %s" % (repo, fname)
                 payload = adb_payload(data, where)
                 meta = read_meta(payload)

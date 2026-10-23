@@ -133,7 +133,8 @@ sysupgrade -T <镜像>
 | `hahaher123/openwrt-oxidns` | `oxidns` |
 | `hahaher123/luci-app-oxidns` | `luci-app-oxidns`、`luci-i18n-oxidns-zh-cn`（含规则文件编辑） |
 | `hahaher123/luci-app-natmap` | `luci-app-natmap`、`luci-i18n-natmap-zh-cn` |
-| `sirpdboy/luci-app-ddns-go` | `ddns-go`、`luci-app-ddns-go`、`luci-i18n-ddns-go-zh-cn`（第三方） |
+| `hahaher123/openwrt-ddns-go` | `ddns-go`（jeessy2/ddns-go 上游源码经官方 SDK 编译，CI 自动跟版） |
+| `sirpdboy/luci-app-ddns-go` | `luci-app-ddns-go`、`luci-i18n-ddns-go-zh-cn`（第三方；归档里混带的 `ddns-go` 二进制在抓取时排除） |
 
 取的都是各仓库的**最新 Release**，所以这些包的版本由上游决定、不由本仓库固定。完整清单以设备上
 执行 `apk list --installed` 为准。
