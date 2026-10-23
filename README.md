@@ -138,6 +138,10 @@ sysupgrade -T <镜像>
 取的都是各仓库的**最新 Release**，所以这些包的版本由上游决定、不由本仓库固定。完整清单以设备上
 执行 `apk list --installed` 为准。
 
+`ddns-go` 的运行日志默认会被它的 init 脚本重定向进系统日志（logread），镜像里由
+`files/etc/uci-defaults/60-ddns-go-quiet` 在首次启动时移除该重定向；日志仍可在 LuCI
+ddns-go 页面查看，不受影响。
+
 ### 地理数据（geoip.dat / geosite.dat）
 
 两个 v2ray 地理数据库在整机里只有**一份**，落在 `/usr/share/v2ray/`：

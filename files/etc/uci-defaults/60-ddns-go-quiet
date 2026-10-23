@@ -1,0 +1,26 @@
+#!/bin/sh
+# 由 openwrt-imagebuilder 的 FILES 覆盖层带进镜像，设备首次启动时执行一次
+# （执行方式与书写注意事项见同目录的 99-lan-ip）。
+#
+# 作用：不让 ddns-go 的运行日志写进系统日志（logread）。
+#
+# 背景：ddns-go 本体只把日志输出到 stdout；是 sirpdboy 包的 /etc/init.d/ddns-go 用
+#     procd_set_param stdout 1 / stderr 1 / log_level 7
+# 把输出重定向进 syslog 的，且没有 UCI 开关。去掉这三行后，日志仍可在 LuCI
+# ddns-go 页面查看 —— 那里读的是 ddns-go 自己的日志，与 syslog 无关。
+#
+# 改法：只删这三行，init 脚本其余逻辑保持上游原样。ddns-go 包是构建时抓的
+# 最新 Release，上游可能随时改脚本，故不做整文件覆盖。grep 判断保证幂等：
+# 三行已不在（上游自行调整过）时不动文件。
+
+INIT=/etc/init.d/ddns-go
+
+if [ -f "$INIT" ] && grep -q 'procd_set_param stdout 1' "$INIT"; then
+	sed -i \
+		-e '/procd_set_param stdout 1/d' \
+		-e '/procd_set_param stderr 1/d' \
+		-e '/procd_set_param log_level 7/d' \
+		"$INIT"
+fi
+
+true
