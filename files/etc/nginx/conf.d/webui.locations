@@ -7,7 +7,7 @@
 # ttyd 终端（LuCI 内嵌页经 ttyd 的 url_override 指到 /ttyd/，见
 # uci-defaults/61-ttyd-sameorigin）。终端是 WebSocket，必须带 Upgrade 头。
 location /ttyd/ {
-	proxy_pass http://127.0.0.1:7681/;
+	proxy_pass http://__LAN_IP__:7681/;
 	proxy_http_version 1.1;
 	proxy_set_header Upgrade $http_upgrade;
 	proxy_set_header Connection "upgrade";
