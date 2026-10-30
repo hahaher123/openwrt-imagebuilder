@@ -198,6 +198,21 @@ uci commit nginx
 /etc/init.d/nginx restart
 ```
 
+## 内嵌应用的同源反代（http/https 自适应）
+
+LuCI 页面走 `https` 后，ttyd / ddns-go / mihomo 面板这类「iframe 内嵌第三方 Web」的页面
+如果还拼 `http://<路由器>:<端口>` 绝对地址，会被浏览器混合内容策略直接拦截（自签证书下
+iframe 里也无法点「继续访问」）。镜像的解法是**同源反代**：内嵌页一律走 nginx 的相对路径，
+自动继承页面协议。
+
+| 应用 | 内嵌路径 | 反代来源 |
+| --- | --- | --- |
+| ttyd 终端 | `/ttyd/` | 镜像 `files/etc/nginx/conf.d/webui.locations` + `files/etc/uci-defaults/61-ttyd-sameorigin`（url_override 首启指向 `/ttyd/`） |
+| ddns-go | `/ddns-go/` | `luci-app-ddns-go` 包自带（hahaher123 fork，含 nginx locations 与前端修改） |
+| mihomo 面板 | `/mihomo-ui/` | `luci-app-mihomo` 包自带（nginx locations + uci-defaults 默认 dashboard） |
+
+三者都是「装上即用」，无需手工配置；用户改过对应 uci 项的话以用户设置为准。
+
 ## 软件源
 
 镜像出厂时 `apk` 的更新源已换成**南京大学镜像**（`https://mirror.nju.edu.cn/openwrt`），

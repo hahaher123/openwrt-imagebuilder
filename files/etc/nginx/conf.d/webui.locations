@@ -1,0 +1,23 @@
+# 镜像 FILES 覆盖层：无包归属的 Web 内嵌反代与杂项。
+# ddns-go 的 /ddns-go/ 反代随 luci-app-ddns-go 包发布（hahaher123 fork），
+# mihomo 面板与 API 的反代随 luci-app-mihomo 包发布，此处不再重复。
+# 本文件被 uci.conf 生成的 server 块经 include conf.d/*.locations 引入，
+# 80 / 443 同份生效。
+
+# ttyd 终端（LuCI 内嵌页经 ttyd 的 url_override 指到 /ttyd/，见
+# uci-defaults/61-ttyd-sameorigin）。终端是 WebSocket，必须带 Upgrade 头。
+location /ttyd/ {
+	proxy_pass http://127.0.0.1:7681/;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade $http_upgrade;
+	proxy_set_header Connection "upgrade";
+	proxy_set_header Host $host;
+	proxy_read_timeout 3600s;
+	proxy_send_timeout 3600s;
+}
+
+# 浏览器对每个站点自动请求 /favicon.ico，/www 下没有该文件，
+# 返回 204 静默掉，避免 nginx 错误日志被 404 刷屏。
+location = /favicon.ico {
+	return 204;
+}

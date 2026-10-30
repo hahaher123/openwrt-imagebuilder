@@ -1,0 +1,21 @@
+#!/bin/sh
+# 由 openwrt-imagebuilder 的 FILES 覆盖层带进镜像，设备首次启动时执行一次
+# （执行方式与书写注意事项见同目录的 99-lan-ip）。
+#
+# 作用：ttyd 的 LuCI 内嵌页走同源反代 /ttyd/，http/https 自适应。
+#
+# 背景：官方 luci-app-ttyd 的内嵌页按「页面协议 + 端口」拼绝对地址
+#     (ssl=='1' ? 'https' : 'http') + '://' + hostname + ':' + port
+# LuCI 走 https 后嵌 http iframe 会被浏览器混合内容策略拦截（自签证书下
+# iframe 里也无法点「继续访问」）。ttyd 官方自带 url_override 选项专为反代
+# 设计：设为相对路径后 iframe 走 nginx 的 /ttyd/ 反代（webui.locations），
+# 自动继承页面协议。
+#
+# 幂等 + 不覆盖用户：url_override 已有值（含用户自己改过）就不动。
+
+if [ -f /etc/config/ttyd ] && [ -z "$(uci -q get ttyd.@ttyd[0].url_override)" ]; then
+	uci set ttyd.@ttyd[0].url_override='/ttyd/'
+	uci commit ttyd
+fi
+
+true
