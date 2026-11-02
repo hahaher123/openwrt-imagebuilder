@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # 由 openwrt-imagebuilder 的 FILES 覆盖层带进镜像，设备首次启动时执行一次
 # （执行方式与书写注意事项见同目录的 99-lan-ip）。
 #

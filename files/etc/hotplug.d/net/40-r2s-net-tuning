@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # R2S 网卡中断/队列调优 —— 只对 friendlyarm,nanopi-r2s* 生效。
 #
 # 由两处触发（同一份逻辑，不重复）：

@@ -1,4 +1,4 @@
-#!/bin/sh /etc/rc.common
+#!/bin/bash /etc/rc.common
 # R2S 启动期调优 —— 只对 friendlyarm,nanopi-r2s* 生效。
 #
 # START=95：排在 network(20)/usb 等之后，确保网卡与 USB 设备都已就绪。

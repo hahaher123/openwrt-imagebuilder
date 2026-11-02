@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # 出厂 apk 更新源：官方 downloads.openwrt.org → 南京大学镜像（NJU）。
 #
 # 为什么用 uci-defaults 而不是打包时直接替换 /etc/apk/repositories.d/distfeeds.list：

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # R2S 出厂定向与调优 —— 仅 friendlyarm,nanopi-r2s* 生效。
 # 覆盖层 files/ 是所有目标共用的，所以必须按板名判断，不能无条件执行。
 #
