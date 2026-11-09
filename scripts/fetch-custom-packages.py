@@ -49,6 +49,7 @@ import os
 import re
 import sys
 import tarfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,7 +70,29 @@ def http_get(url, token=None, timeout=300):
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     opener = urllib.request.build_opener(*handlers)
-    return opener.open(req, timeout=timeout).read()
+    # GitHub 的 release 资产 CDN（objects/release-assets.githubusercontent.com）偶发
+    # 504，连 Actions runner 内网都中过招；一次瞬时 504 就让整个抓包失败太脆。
+    # 对 5xx 与断连做指数退避重试（10/20/40s），4xx 不重试（那是真错误）。
+    delay = 10
+    for attempt in range(4):
+        try:
+            return opener.open(req, timeout=timeout).read()
+        except urllib.error.HTTPError as exc:
+            if exc.code >= 500 and attempt < 3:
+                print("      ! HTTP %d，%ds 后重试（第 %d/3 次）"
+                      % (exc.code, delay, attempt + 1))
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
+        except OSError:
+            if attempt < 3:
+                print("      ! 网络错误，%ds 后重试（第 %d/3 次）"
+                      % (delay, attempt + 1))
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
 
 
 def latest_release(repo, token):
